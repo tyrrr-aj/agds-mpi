@@ -1,5 +1,9 @@
 #include "mpi.h"
 
+#include <vector>
+#include <algorithm>
+#include <numeric>
+
 #include "utils.hpp"
 
 
@@ -8,6 +12,38 @@ void cumulated_sum_shifted(int* arr, int len, int* res) { // for [1,2,3,4,5] fil
     for (int i = 1; i < len; i++) {
         res[i] = arr[i-1] + res[i-1];
     }
+}
+
+int sum(int* arr, int len) {
+    int res = 0;
+    for (int i = 0; i < len; i++) {
+        res += arr[i];
+    }
+
+    return res;
+}
+
+int max_elem_index(int* arr, int len) {
+    int res = 0;
+    int max = arr[0];
+    for (int i = 1; i < len; i++) {
+        if (arr[i] > max) {
+            max = arr[i];
+            res = i;
+        }
+    }
+    return res;
+}
+
+
+std::vector<int> sort_indices(double* v, int n) {
+  std::vector<int> idx(n);
+  iota(idx.begin(), idx.end(), 0);
+
+  stable_sort(idx.begin(), idx.end(),
+       [v](int i1, int i2) {return v[i1] < v[i2];});
+
+  return idx;
 }
 
 

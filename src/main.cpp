@@ -2,11 +2,9 @@
 #include <mpe.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <numeric>
 #include <cmath>
 #include <random>
 #include <vector>
-#include <algorithm>
 
 #include "scan_prod_mpi.hpp"
 #include "inference.hpp"
@@ -31,30 +29,6 @@ const int AGDS_MASTER_RANK = 0;
 
 const double EPSILON = 0.00001;
 
-
-// memory and data management
-
-
-int sum(int* arr, int len) {
-    int res = 0;
-    for (int i = 0; i < len; i++) {
-        res += arr[i];
-    }
-
-    return res;
-}
-
-int max_elem_index(int* arr, int len) {
-    int res = 0;
-    int max = arr[0];
-    for (int i = 1; i < len; i++) {
-        if (arr[i] > max) {
-            max = arr[i];
-            res = i;
-        }
-    }
-    return res;
-}
 
 int* divide_workers(int* counts, int mpi_size, int* masters_indices, int* Vng_n_p) {
     int n_workers = mpi_size;
@@ -114,17 +88,6 @@ int* divide_workers(int* counts, int mpi_size, int* masters_indices, int* Vng_n_
     delete[] counts_tmp;
 
     return colours;
-}
-
-
-std::vector<int> sort_indices(double* v, int n) {
-  std::vector<int> idx(n);
-  iota(idx.begin(), idx.end(), 0);
-
-  stable_sort(idx.begin(), idx.end(),
-       [v](int i1, int i2) {return v[i1] < v[i2];});
-
-  return idx;
 }
 
 
