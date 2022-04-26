@@ -1,0 +1,1 @@
+mpic++ ../src/main.cpp -o main -I/$HOME/installs/mpe2/include -L/$HOME/installs/mpe2/lib -lmpe -pthread
