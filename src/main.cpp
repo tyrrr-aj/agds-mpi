@@ -30,6 +30,13 @@ const int AGDS_MASTER_RANK = 0;
 const double EPSILON = 0.00001;
 
 
+void get_global_vn_conn_indices(int* CONN_global, int* CONN, int* CONN_ix, int* VN_conn_counts_cumulated) {
+    for (int i = 0; i < N_ON * N_GROUPS; i++) {
+        CONN_global[i] = VN_conn_counts_cumulated[CONN[i]] + CONN_ix[i];
+    }
+}
+
+
 int* divide_workers(int* counts, int mpi_size, int* masters_indices, int* Vng_n_p) {
     int n_workers = mpi_size;
     int* worker_division = new int[N_GROUPS];
@@ -91,7 +98,7 @@ int* divide_workers(int* counts, int mpi_size, int* masters_indices, int* Vng_n_
 }
 
 
-int build_tree(double* values, double* tree, int* counts, int* CONN, int g_ix) {
+int build_tree(double* values, double* tree, int* counts, int* CONN, int* CONN_ix, int g_ix) {
     // mock implementation
     double* tree_tmp = new double[N_ON];
     int* counts_tmp = new int[N_ON];
@@ -105,6 +112,7 @@ int build_tree(double* values, double* tree, int* counts, int* CONN, int g_ix) {
             if (fabs(tree_tmp[j] - values[i]) < EPSILON) {
                 counts_tmp[j]++;
                 CONN[i * N_GROUPS + g_ix] = j;
+                CONN_ix[i * N_GROUPS + g_ix] = counts_tmp[j] - 1;
                 found = true;
                 break;
             }
@@ -114,6 +122,7 @@ int build_tree(double* values, double* tree, int* counts, int* CONN, int g_ix) {
             tree_tmp[distinct_count] = values[i];
             counts_tmp[distinct_count] = 1;
             CONN[i * N_GROUPS + g_ix] = distinct_count;
+            CONN_ix[i * N_GROUPS + g_ix] = 0;
             distinct_count++;
         }
     }
@@ -159,6 +168,9 @@ int main(int argc, char** argv)
     int master_ranks[N_GROUPS];
     int Vng_n_p[N_GROUPS];
     int* CONN;
+    int* CONN_local_ix;
+    int* CONN_global_ix;
+    int* VN_conn_counts_cumulated;
 
     // init data, divide processes into groups, build mock tree for each VNG
     if (rank == AGDS_MASTER_RANK) {
@@ -167,15 +179,25 @@ int main(int argc, char** argv)
         trees = new double[N_GROUPS * N_ON];
         N_vn_vngs = new int[N_GROUPS * N_ON];
         CONN = new int[N_ON * N_GROUPS];
+        CONN_local_ix = new int[N_ON * N_GROUPS];
 
         int offset = 0;
         for (int g = 0; g < N_GROUPS; g++) {
-            Vng_n_vns[g] = build_tree(&(data[g * N_ON]), &(trees[offset]), &(N_vn_vngs[offset]), CONN, g);
+            Vng_n_vns[g] = build_tree(&(data[g * N_ON]), &(trees[offset]), &(N_vn_vngs[offset]), CONN, CONN_local_ix, g);
             offset += Vng_n_vns[g];
             printf("N_vns_vng_%d: %d\n", g, Vng_n_vns[g]);
         }
 
         worker_spread = divide_workers(Vng_n_vns, size, master_ranks, Vng_n_p);
+
+        // compute vn-on connections global indices
+        VN_conn_counts_cumulated = new int[N_ON * N_GROUPS];
+        cumulated_sum(N_vn_vngs, sum(Vng_n_vns, N_GROUPS), VN_conn_counts_cumulated);
+
+        CONN_global_ix = new int[N_ON * N_GROUPS];
+        get_global_vn_conn_indices(CONN_global_ix, CONN, CONN_local_ix, VN_conn_counts_cumulated);
+
+
     }
 
     // share number of processes belonging to each group (direct and cumulated)
@@ -471,6 +493,9 @@ int main(int argc, char** argv)
         delete[] N_vn_vngs;
 
         delete[] CONN;
+        delete[] CONN_local_ix;
+        delete[] CONN_global_ix;
+        delete[] VN_conn_counts_cumulated;
         delete[] CONN_len_all_proc;
         delete[] displacements;
 

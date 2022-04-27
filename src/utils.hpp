@@ -6,6 +6,7 @@
 #include <stdio.h>
 
 
+void cumulated_sum(int* arr, int len, int* res); // for [1,2,3,4,5] fills res with [1,3,6,10,15]
 void cumulated_sum_shifted(int* arr, int len, int* res); // for [1,2,3,4,5] fills res with [0,1,3,6,10]
 int sum(int* arr, int len);
 int max_elem_index(int* arr, int len);

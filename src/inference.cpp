@@ -51,6 +51,21 @@ double weight_vns(double r_left, double r_right) {
 }
 
 
+int vn_conn_proc_id(int n_proc, int n_vn_conns, int conn_global_id) {
+    int max_n_conns_per_proc = n_vn_conns / n_proc + 1;
+    int min_n_conns_per_proc = n_vn_conns / n_proc;
+    
+    int threshold = n_vn_conns % n_proc;
+
+    if (conn_global_id / max_n_conns_per_proc < threshold) {
+        return conn_global_id / max_n_conns_per_proc;
+    }
+    else {
+        return threshold + (conn_global_id - threshold * max_n_conns_per_proc) / min_n_conns_per_proc;
+    }
+}
+
+
 int vn_proc_id(int vn_id, int vng_id) {
     return VNG_SIZES_CUMULATED[vng_id] + vn_id % VNG_SIZES[vng_id];
 }

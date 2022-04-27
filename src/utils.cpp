@@ -7,6 +7,13 @@
 #include "utils.hpp"
 
 
+void cumulated_sum(int* arr, int len, int* res) { // for [1,2,3,4,5] fills res with [1,3,6,10,15]
+    res[0] = arr[0];
+    for (int i = 1; i < len; i++) {
+        res[i] = arr[i] + res[i-1];
+    }
+}
+
 void cumulated_sum_shifted(int* arr, int len, int* res) { // for [1,2,3,4,5] fills res with [0,1,3,6,10]
     res[0] = 0;
     for (int i = 1; i < len; i++) {
