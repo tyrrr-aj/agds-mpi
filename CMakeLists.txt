@@ -5,7 +5,7 @@ project(agds_mpi)
 find_package(MPI REQUIRED)
 set(CMAKE_CXX_COMPILER mpic++)
 
-include_directories($ENV{HOME}/installs/mpe2/include)
+include_directories(SYSTEM $ENV{HOME}/installs/mpe2/include)
 link_directories($ENV{HOME}/installs/mpe2/lib)
 
 #message(STATUS "Run: ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG} ${MPIEXEC_MAX_NUMPROCS} ${MPIEXEC_PREFLAGS} EXECUTABLE ${MPIEXEC_POSTFLAGS} ARGS")

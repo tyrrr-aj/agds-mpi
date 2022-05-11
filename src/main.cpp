@@ -29,6 +29,169 @@ const int AGDS_MASTER_RANK = 0;
 
 const double EPSILON = 0.00001;
 
+#pragma region Debug
+
+void debug_printf_from_vng_leaders(const int rank, const int vng_rank, const int vng_id, const int n_vn_vng) {
+    if (vng_rank == 0) {
+        printf("I'm %d, 0 in group %d, and my VNG consists of %d VNs\n", rank, vng_id, n_vn_vng);
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+}
+
+void debug_printf_from_all_workers(const int rank, const int vng_id, const int n_vn_p) {
+    printf("I'm %d, working for %d, and I've received %d values\n", rank, vng_id, n_vn_p);
+}
+
+#pragma endregion
+
+
+#pragma region Generic functions
+
+void mpi_size_and_rank(const MPI_Comm &comm, int &size, int &rank) {
+    MPI_Comm_size(comm, &size);
+    MPI_Comm_rank(comm, &rank);
+}
+
+#pragma endregion
+
+
+#pragma region VNG group
+
+void split_processes_into_vngs(int* const worker_spread, const int rank, int &vng_id, int &vng_size, int &vng_rank, MPI_Comm &vng_comm) {
+    MPI_Scatter(worker_spread, 1, MPI_INT, &vng_id, 1, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    
+    MPI_Comm_split(MPI_COMM_WORLD, vng_id, rank, &vng_comm);
+    MPI_Comm_size(vng_comm, &vng_size);
+    MPI_Comm_rank(vng_comm, &vng_rank);
+}
+
+void broadcast_number_of_vns_in_vngs(int& n_vn_vng, const MPI_Comm &vng_comm) {
+    // Each VNG leader informs the rest of processes in VNG about the number of VNs in this VNG
+    MPI_Bcast(&n_vn_vng, 1, MPI_INT, 0, vng_comm);
+}
+
+void compute_vn_prod(double* const tree, const int n_vn_vng, double* &Vn_prod_from_scan_p, double &vn_range, int &n_vn_p, const MPI_Comm &vng_comm) {
+    // compute VN_prod_from_scan_p vector via scan - it's sorted, which is not the desired order
+    scan_prod_mpi(tree, n_vn_vng, &Vn_prod_from_scan_p, &vn_range, &n_vn_p, 0, vng_comm);
+}
+
+void broadcast_number_of_vns_in_vngs(int* const Vng_n_vns) {
+    // Vector with numbers of VNs in each VNG is shared with all processes (by master)
+    MPI_Bcast(Vng_n_vns, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+}
+
+void gather_number_of_vns_per_proc(const int n_vn_p, int* const n_vn_of_ps_in_vng, int* &displ_vng_p, int vng_rank, int vng_size, const MPI_Comm &vng_comm) {
+    //      gathering information about number of VNs in each process within VNG
+    MPI_Gather(&n_vn_p, 1, MPI_INT, n_vn_of_ps_in_vng, 1, MPI_INT, 0, vng_comm);
+
+    if (vng_rank == 0) {
+        displ_vng_p = new int[vng_size];
+        cumulated_sum_shifted(n_vn_of_ps_in_vng, vng_size, displ_vng_p);
+    }
+}
+
+void gather_full_vn_prod_from_scan_vng(double* const Vn_prod_from_scan_p, const int n_vn_p, double* const Vn_prod_from_scan_vng,
+        int* const n_vn_of_ps_in_vng, int* const displ_vng_p, const MPI_Comm &vng_comm) {
+    //      gathering global Vn_prod_from_scan for each VNG
+    MPI_Gatherv(Vn_prod_from_scan_p, n_vn_p, MPI_DOUBLE, Vn_prod_from_scan_vng, n_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, 0, vng_comm);
+}
+
+void reorder_vn_prod_vng(const int vng_size, const int vng_rank, const int n_vn_vng, double* const Vn_prod_vng, 
+        double* const Vn_prod_from_scan_vng, int* const N_vn_vng, int* &N_vn_vng_reordered) {
+    if (vng_rank == 0) {
+        N_vn_vng_reordered = new int[n_vn_vng];
+
+        int target_ix;
+
+        for (int i = 0; i < n_vn_vng; i++) {
+            int target_p = i % vng_size;
+            int p_offset = (n_vn_vng / vng_size) * target_p + std::min(n_vn_vng % vng_size, target_p);
+            target_ix = p_offset + i / vng_size;
+            Vn_prod_vng[target_ix] = Vn_prod_from_scan_vng[i];
+            N_vn_vng_reordered[target_ix] = N_vn_vng[i];
+        }
+    }
+}
+
+void distribute_reordered_vn_prod_vng(double* const Vn_prod_vng, int* const N_vn_vng_reordered, int* const n_vn_of_ps_in_vng, 
+        int* const displ_vng_p, double* const Vn_prod_p, int* const N_vn_p, int n_vn_p, const MPI_Comm &vng_comm) {
+    MPI_Scatterv(Vn_prod_vng, n_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, Vn_prod_p, n_vn_p, MPI_DOUBLE, 0, vng_comm);
+    MPI_Scatterv(N_vn_vng_reordered, n_vn_of_ps_in_vng, displ_vng_p, MPI_INT, N_vn_p, n_vn_p, MPI_INT, 0, vng_comm);
+}
+
+#pragma endregion
+
+
+#pragma region VNG-masters group
+
+void scatter_vng_sizes(int* const Vng_n_vns, int& n_vn_vng, const MPI_Comm& masters_comm) {
+    // inform each master about number of VNs in its VNG
+
+    MPI_Scatter(Vng_n_vns, 1, MPI_INT, &n_vn_vng, 1, MPI_INT, AGDS_MASTER_RANK, masters_comm);
+}
+
+void distribute_VN_v_and_VN_n(const int rank, const int n_vn_vng, int* const Vng_n_vns, double* const trees, double* const tree,
+        int* const N_vn_vngs, int* const N_vn_vng, const MPI_Comm& masters_comm) {
+    // distribute VN_v and VN_n between masters of VNGs
+
+    int displs[N_GROUPS];
+    if (rank == AGDS_MASTER_RANK) {
+        cumulated_sum_shifted(Vng_n_vns, N_GROUPS, displs);
+    }
+
+    MPI_Scatterv(trees, Vng_n_vns, displs, MPI_DOUBLE, tree, n_vn_vng, MPI_DOUBLE, AGDS_MASTER_RANK, masters_comm);
+    MPI_Scatterv(N_vn_vngs, Vng_n_vns, displs, MPI_INT, N_vn_vng, n_vn_vng, MPI_INT, AGDS_MASTER_RANK, masters_comm);
+}
+
+#pragma endregion
+
+
+#pragma region World group
+
+// share number of processes belonging to each group (direct and cumulated)
+void share_vng_proc_sizes(int* const master_ranks, int* const Vng_n_p) {
+    MPI_Bcast(master_ranks, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    MPI_Bcast(Vng_n_p, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+}
+
+// create group and communicator for masters of VNGs
+void setup_vng_communicators(const MPI_Group& world_group, int* const master_ranks, MPI_Group& masters_group, MPI_Comm& masters_comm) {
+    MPI_Group_incl(world_group, N_GROUPS, master_ranks, &masters_group);
+    MPI_Comm_create_group(MPI_COMM_WORLD, masters_group, MASTERS_TAG, &masters_comm);
+}
+
+void broadcast_conn_matrix(int size, int rank, int& n_on_p, int* const CONN, int*& CONN_p) {
+    int* CONN_len_all_proc;
+    int* displacements;
+    if (rank == AGDS_MASTER_RANK) {
+        CONN_len_all_proc = new int[size];
+        displacements = new int[size];
+    }
+
+    n_on_p = N_ON / size + (N_ON % size > rank ? 1 : 0);
+
+    MPI_Gather(&n_on_p, 1, MPI_INT, CONN_len_all_proc, 1, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+
+    if (rank == AGDS_MASTER_RANK) {
+        for (int i = 0; i < size; i++) {
+            CONN_len_all_proc[i] *= N_GROUPS;
+        }
+        cumulated_sum_shifted(CONN_len_all_proc, size, displacements);
+    }
+
+    CONN_p = new int[n_on_p * N_GROUPS];
+    MPI_Scatterv(CONN, CONN_len_all_proc, displacements, MPI_INT, CONN_p, n_on_p * N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+
+    if (rank == AGDS_MASTER_RANK) {
+        delete[] CONN_len_all_proc;
+        delete[] displacements;
+    }
+}
+
+#pragma endregion
+
+
+#pragma region World Master-specific
 
 void get_global_vn_conn_indices(int* CONN_global, int* CONN, int* CONN_ix, int* VN_conn_counts_cumulated) {
     for (int i = 0; i < N_ON * N_GROUPS; i++) {
@@ -146,203 +309,142 @@ int build_tree(double* values, double* tree, int* counts, int* CONN, int* CONN_i
     return distinct_count;
 }
 
+// init data, divide processes into groups, build mock tree for each VNG
+void setup_data_and_groups(int size, double* data, double* trees, int* N_vn_vngs, int* CONN, int* CONN_global_ix,
+        int* Vng_n_vns, int* worker_spread, int* master_ranks, int* Vng_n_p) {
+    data = init_full_data(N_GROUPS, N_ON);
+
+    int* CONN_local_ix = new int[N_ON * N_GROUPS];
+
+    int offset = 0;
+    for (int g = 0; g < N_GROUPS; g++) {
+        Vng_n_vns[g] = build_tree(&(data[g * N_ON]), &(trees[offset]), &(N_vn_vngs[offset]), CONN, CONN_local_ix, g);
+        offset += Vng_n_vns[g];
+        printf("N_vns_vng_%d: %d\n", g, Vng_n_vns[g]);
+    }
+
+    worker_spread = divide_workers(Vng_n_vns, size, master_ranks, Vng_n_p);
+
+    // compute vn-on connections global indices
+    int* VN_conn_counts_cumulated = new int[N_ON * N_GROUPS];
+    cumulated_sum(N_vn_vngs, sum(Vng_n_vns, N_GROUPS), VN_conn_counts_cumulated);
+
+    get_global_vn_conn_indices(CONN_global_ix, CONN, CONN_local_ix, VN_conn_counts_cumulated);
+
+    delete[] CONN_local_ix;
+    delete[] VN_conn_counts_cumulated;
+}
+
+#pragma endregion
 
 
 int main(int argc, char** argv)
 {
-    // init MPI
+    #pragma region Init MPI
+
     MPI_Init(&argc, &argv);
 
     int size, rank;
-    MPI_Comm_size(MPI_COMM_WORLD, &size);
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    mpi_size_and_rank(MPI_COMM_WORLD, size, rank);
 
     MPI_Group world_group;
     MPI_Comm_group(MPI_COMM_WORLD, &world_group);
 
+    MPI_Group masters_group;
+    MPI_Comm masters_comm;
+
+    MPI_Comm vng_comm;
+
+    #pragma endregion
+
+    #pragma region Init variables
+
     double* data;
-    double* trees;
-    int* N_vn_vngs;
+    double* trees = new double[N_GROUPS * N_ON];;
+    int* N_vn_vngs = new int[N_GROUPS * N_ON];
     int* Vng_n_vns = new int[N_GROUPS];
     int* worker_spread;
     int master_ranks[N_GROUPS];
     int Vng_n_p[N_GROUPS];
-    int* CONN;
-    int* CONN_local_ix;
-    int* CONN_global_ix;
-    int* VN_conn_counts_cumulated;
 
-    // init data, divide processes into groups, build mock tree for each VNG
-    if (rank == AGDS_MASTER_RANK) {
-        data = init_full_data(N_GROUPS, N_ON);
+    int* CONN = new int[N_ON * N_GROUPS];
+    int* CONN_global_ix = new int[N_ON * N_GROUPS];
+    int* CONN_p;
 
-        trees = new double[N_GROUPS * N_ON];
-        N_vn_vngs = new int[N_GROUPS * N_ON];
-        CONN = new int[N_ON * N_GROUPS];
-        CONN_local_ix = new int[N_ON * N_GROUPS];
-
-        int offset = 0;
-        for (int g = 0; g < N_GROUPS; g++) {
-            Vng_n_vns[g] = build_tree(&(data[g * N_ON]), &(trees[offset]), &(N_vn_vngs[offset]), CONN, CONN_local_ix, g);
-            offset += Vng_n_vns[g];
-            printf("N_vns_vng_%d: %d\n", g, Vng_n_vns[g]);
-        }
-
-        worker_spread = divide_workers(Vng_n_vns, size, master_ranks, Vng_n_p);
-
-        // compute vn-on connections global indices
-        VN_conn_counts_cumulated = new int[N_ON * N_GROUPS];
-        cumulated_sum(N_vn_vngs, sum(Vng_n_vns, N_GROUPS), VN_conn_counts_cumulated);
-
-        CONN_global_ix = new int[N_ON * N_GROUPS];
-        get_global_vn_conn_indices(CONN_global_ix, CONN, CONN_local_ix, VN_conn_counts_cumulated);
-
-
-    }
-
-    // share number of processes belonging to each group (direct and cumulated)
-    MPI_Bcast(master_ranks, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-    MPI_Bcast(Vng_n_p, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-
-    // create group and communicator for masters of VNGs
-    MPI_Group masters_group;
-    MPI_Group_incl(world_group, N_GROUPS, master_ranks, &masters_group);
-
-    MPI_Comm masters_comm;
-    MPI_Comm_create_group(MPI_COMM_WORLD, masters_group, MASTERS_TAG, &masters_comm);
-
-    // share CONN matrix with all processes
-    int* CONN_len_all_proc;
-    int* displacements;
-    if (rank == AGDS_MASTER_RANK) {
-        CONN_len_all_proc = new int[size];
-        displacements = new int[size];
-    }
-
-    int n_on_p = N_ON / size + (N_ON % size > rank ? 1 : 0);
-
-    MPI_Gather(&n_on_p, 1, MPI_INT, CONN_len_all_proc, 1, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-
-    if (rank == AGDS_MASTER_RANK) {
-        for (int i = 0; i < size; i++) {
-            CONN_len_all_proc[i] *= N_GROUPS;
-        }
-        cumulated_sum_shifted(CONN_len_all_proc, size, displacements);
-    }
-
-    int* CONN_p = new int[n_on_p * N_GROUPS];
-    MPI_Scatterv(CONN, CONN_len_all_proc, displacements, MPI_INT, CONN_p, n_on_p * N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-
-    // initialize the leader of each VNG
     double *values, *tree;
     int *counts, *N_vn_vng;
     int n_vn_vng;
+    int n_on_p;
 
-    if (masters_comm != MPI_COMM_NULL) {
-        // get size and rank
-        int masters_size, masters_rank;
-        MPI_Comm_size(masters_comm, &masters_size);
-        MPI_Comm_rank(masters_comm, &masters_rank);
-
-        // inform each master about number of VNs in its VNG
-        MPI_Scatter(Vng_n_vns, 1, MPI_INT, &n_vn_vng, 1, MPI_INT, AGDS_MASTER_RANK, masters_comm);
-
-        // distribute VN_v and VN_n between masters of VNGs
-        tree = new double[n_vn_vng];
-        N_vn_vng = new int[n_vn_vng];
-
-        int displs[N_GROUPS];
-        if (rank == AGDS_MASTER_RANK) {
-            cumulated_sum_shifted(Vng_n_vns, N_GROUPS, displs);
-        }
-
-        MPI_Scatterv(trees, Vng_n_vns, displs, MPI_DOUBLE, tree, n_vn_vng, MPI_DOUBLE, AGDS_MASTER_RANK, masters_comm);
-        MPI_Scatterv(N_vn_vngs, Vng_n_vns, displs, MPI_INT, N_vn_vng, n_vn_vng, MPI_INT, AGDS_MASTER_RANK, masters_comm);
-    }
-
-    // split all processes between VNGs
     int vng_id;
-    MPI_Scatter(worker_spread, 1, MPI_INT, &vng_id, 1, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-
-    MPI_Comm vn_group_comm;
-    MPI_Comm_split(MPI_COMM_WORLD, vng_id, rank, &vn_group_comm);
-
     int vng_size, vng_rank;
-    MPI_Comm_size(vn_group_comm, &vng_size);
-    MPI_Comm_rank(vn_group_comm, &vng_rank);
 
-    // Each VNG leader informs the rest of processes in VNG about number of VNs in this VNG
-    MPI_Bcast(&n_vn_vng, 1, MPI_INT, 0, vn_group_comm);
-
-    // DEBUG printf from VNG leaders
-
-    // if (vng_rank == 0) {
-    //     printf("I'm %d, 0 in group %d, and my VNG consists of %d VNs\n", rank, vng_id, n_vn_vng);
-    // }
-    // MPI_Barrier(MPI_COMM_WORLD);
-
-    // compute VN_prod_from_scan_p vector via scan - it's sorted, which is not the desired order
     double* Vn_prod_from_scan_p;
     double vn_range;
     int n_vn_p;
-    scan_prod_mpi(tree, n_vn_vng, &Vn_prod_from_scan_p, &vn_range, &n_vn_p, 0, vn_group_comm);
 
-    // DEBUG printf from all workers
-    // printf("I'm %d, working for %d, and I've received %d values\n", rank, vng_id, n_vn_p);
+    int* displ_vng_p;
 
-    // Vector with numbers of VNs in each VNG is shared with all processes (by master)
-    MPI_Bcast(Vng_n_vns, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-
-    // computing vector VN_prod_vng in desired order
     int* n_vn_of_ps_in_vng;
     double* Vn_prod_from_scan_vng;
     double* Vn_prod_vng;
+    double* Vn_prod_p;
+
+    int* N_vn_vng_reordered;
+
+    #pragma endregion
+
+    // setup global Master
+    if (rank == AGDS_MASTER_RANK) { // process is a global Master
+        setup_data_and_groups(size, data, trees, N_vn_vngs, CONN, CONN_global_ix, Vng_n_vns, worker_spread, master_ranks, Vng_n_p);
+    }
+
+    // share basic data with everybody
+    share_vng_proc_sizes(master_ranks, Vng_n_p);
+    setup_vng_communicators(world_group, master_ranks, masters_group, masters_comm);
+    broadcast_conn_matrix(size, rank, n_on_p, CONN, CONN_p);
+    
+
+    // setup VNG masters
+    if (masters_comm != MPI_COMM_NULL) { // process is a Master of one of the VNGs
+        int masters_size, masters_rank;
+        mpi_size_and_rank(masters_comm, masters_size, masters_rank);
+
+        scatter_vng_sizes(Vng_n_vns, n_vn_vng, masters_comm);
+
+        tree = new double[n_vn_vng];
+        N_vn_vng = new int[n_vn_vng];
+
+        distribute_VN_v_and_VN_n(rank, n_vn_vng, Vng_n_vns, trees, tree, N_vn_vngs, N_vn_vng, masters_comm);
+    }
+
+    // setup VNGs
+    split_processes_into_vngs(worker_spread, rank, vng_id, vng_size, vng_rank, vng_comm);
+    broadcast_number_of_vns_in_vngs(n_vn_vng, vng_comm);
+    // debug_printf_from_vng_leaders(rank, vng_rank, vng_id, n_vn_vng);
+    compute_vn_prod(tree, n_vn_vng, Vn_prod_from_scan_p, vn_range, n_vn_p, vng_comm);
+    // debug_printf_from_all_workers(rank, vng_id, n_vn_p);
+    broadcast_number_of_vns_in_vngs(Vng_n_vns);
+
     if (vng_rank == 0) {
         n_vn_of_ps_in_vng = new int[vng_size];
         Vn_prod_vng = new double[n_vn_vng];
         Vn_prod_from_scan_vng = new double[n_vn_vng];
     }
-    double* Vn_prod_p = new double[n_vn_p];
-    
-    //      gathering information about number of VNs in each process within VNG
-    MPI_Gather(&n_vn_p, 1, MPI_INT, n_vn_of_ps_in_vng, 1, MPI_INT, 0, vn_group_comm);
+    Vn_prod_p = new double[n_vn_p];
 
-    int* displ_vng_p;
-    if (vng_rank == 0) {
-        displ_vng_p = new int[vng_size];
-        cumulated_sum_shifted(n_vn_of_ps_in_vng, vng_size, displ_vng_p);
-    }
-
-    //      gathering global Vn_prod_from_scan for each VNG
-    MPI_Gatherv(Vn_prod_from_scan_p, n_vn_p, MPI_DOUBLE, Vn_prod_from_scan_vng, n_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, 0, vn_group_comm);
-
-    //      reordering Vn_prod_from_scan_vng and N_vn_vng
-    int* N_vn_vng_reordered;
-
-    if (vng_rank == 0) {
-        N_vn_vng_reordered = new int[n_vn_vng];
-
-        int target_ix;
-
-        for (int i = 0; i < n_vn_vng; i++) {
-            int target_p = i % vng_size;
-            int p_offset = (n_vn_vng / vng_size) * target_p + std::min(n_vn_vng % vng_size, target_p);
-            target_ix = p_offset + i / vng_size;
-            Vn_prod_vng[target_ix] = Vn_prod_from_scan_vng[i];
-            N_vn_vng_reordered[target_ix] = N_vn_vng[i];
-        }
-    }
-
-    // distributing reordered VN_prod_vng and N_vn_vng between processes within VNG
+    gather_number_of_vns_per_proc(n_vn_p, n_vn_of_ps_in_vng, displ_vng_p, vng_rank, vng_size, vng_comm);
+    gather_full_vn_prod_from_scan_vng(Vn_prod_from_scan_p, n_vn_p, Vn_prod_from_scan_vng, n_vn_of_ps_in_vng, displ_vng_p, vng_comm);
+    reorder_vn_prod_vng(vng_size, vng_rank, n_vn_vng, Vn_prod_vng, Vn_prod_from_scan_vng, N_vn_vng, N_vn_vng_reordered);
     int N_vn_p[n_vn_p];
+    distribute_reordered_vn_prod_vng(Vn_prod_vng, N_vn_vng_reordered, n_vn_of_ps_in_vng, displ_vng_p, Vn_prod_p, N_vn_p, n_vn_p, vng_comm);
 
-    MPI_Scatterv(Vn_prod_vng, n_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, Vn_prod_p, n_vn_p, MPI_DOUBLE, 0, vn_group_comm);
-    MPI_Scatterv(N_vn_vng_reordered, n_vn_of_ps_in_vng, displ_vng_p, MPI_INT, N_vn_p, n_vn_p, MPI_INT, 0, vn_group_comm);
 
     // PREDICT
     // compute inferences
 
-    setup_for_inference(n_vn_p, n_on_p, N_GROUPS, Vng_n_p, n_vn_vng, vng_id, vn_group_comm, CONN_p, Vn_prod_p, N_vn_p);
+    setup_for_inference(n_vn_p, n_on_p, N_GROUPS, Vng_n_p, NULL, n_vn_vng, vng_id, vng_comm, CONN_p, Vn_prod_p, N_vn_p,
+        0, 0, 0, NULL, NULL, NULL, NULL);
 
     int* all_activated_vns = new int[ACTIVATED_VNS_PER_GROUP * N_GROUPS];
     int* on_queries = new int[ACTIVATED_ONS * N_QUERIES];
@@ -418,7 +520,7 @@ int main(int argc, char** argv)
             mock_vn_queries_vng(vn_queries_inactive_vngs, vn_queries_vng, N_GROUPS, N_QUERIES, ACTIVATED_VNS_PER_GROUP);
         }
 
-        MPI_Bcast(vn_queries_vng, N_QUERIES * ACTIVATED_VNS_PER_GROUP, MPI_INT, 0, vn_group_comm);
+        MPI_Bcast(vn_queries_vng, N_QUERIES * ACTIVATED_VNS_PER_GROUP, MPI_INT, 0, vng_comm);
 
         // find local VNs in queries
         int local_vn_queries[N_QUERIES * ACTIVATED_VNS_PER_GROUP];
@@ -479,7 +581,8 @@ int main(int argc, char** argv)
         printf("Time: %.2fs\n", end_time - start_time);
     }
 
-    // CLEANUP
+    
+    # pragma region Cleanup
 
     delete[] Vng_n_vns;
     delete[] CONN_p;
@@ -493,11 +596,7 @@ int main(int argc, char** argv)
         delete[] N_vn_vngs;
 
         delete[] CONN;
-        delete[] CONN_local_ix;
         delete[] CONN_global_ix;
-        delete[] VN_conn_counts_cumulated;
-        delete[] CONN_len_all_proc;
-        delete[] displacements;
 
         delete[] worker_spread;
     //     // delete[] query;
@@ -517,8 +616,12 @@ int main(int argc, char** argv)
         MPI_Comm_free(&masters_comm);
     }
 
-    MPI_Comm_free(&vn_group_comm);
+    MPI_Comm_free(&vng_comm);
 
     MPI_Finalize();
+
+    #pragma endregion
+
+
     return 0;
 }
