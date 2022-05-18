@@ -13,7 +13,7 @@
 
 int N_PROC;
 
-int N_REC;
+int N_GROUPS;
 
 int N_VN_PROC;
 int N_ON_PROC;
@@ -45,7 +45,8 @@ int own_vng_id;
 
 MPI_Comm VNG_COMM;
 
-int* CONN; // global IDs of ON->VN connections, stored by VNGs ([CONN_VNG0_ON0, CONN_VNG0_ON1, ..., CONN_VNG1_ON0, ...])
+int* CONN; // ids of VNs to which each ON is connected, stored by ONs and VNGs ([CONN_ON0_VNG0, CONN_ON0_VNG1, ..., CONN_ON1_VNG0, ...])
+int* CONN_global_ix; // global IDs of ON->VN connections, stored by ONs and VNGs ([CONN_ON0_VNG0, CONN_ON0_VNG1, ..., CONN_ON1_VNG0, ...])
 
 
 // locally initialized
@@ -130,7 +131,7 @@ int vn_by_conn_local_id(int conn_local_idx) {
 }
 
 int vn_proc_id(int vn_global_id) {
-    int vng_id = upper_bound(VNG_SIZES_VNS_CUMULATED, N_REC, vn_global_id);
+    int vng_id = upper_bound(VNG_SIZES_VNS_CUMULATED, N_GROUPS, vn_global_id);
     int vn_local_id = vn_global_id - VNG_SIZES_VNS_CUMULATED_SHIFTED[vng_id];
     
     return vn_proc_id(vn_local_id, vng_id);
@@ -200,7 +201,7 @@ void calculate_weighted_vn_activations() {
 
 void get_activations_from_vns() {
     if (are_on_to_vn_send_requests_filled) {
-        MPI_Waitall(N_ON_PROC * N_REC, on_to_vn_send_requests, MPI_STATUSES_IGNORE);
+        MPI_Waitall(N_ON_PROC * N_GROUPS, on_to_vn_send_requests, MPI_STATUSES_IGNORE);
         are_on_to_vn_send_requests_filled = false;
     }
 
@@ -208,14 +209,14 @@ void get_activations_from_vns() {
 
     double remote_vn_act;
     for (int on_ix = 0; on_ix < N_ON_PROC; on_ix++) {
-        for (int vng_ix = 0; vng_ix < N_REC; vng_ix++) {
-            if (CONN[on_ix * N_REC + vng_ix] != -1) {
+        for (int vng_ix = 0; vng_ix < N_GROUPS; vng_ix++) {
+            if (CONN[on_ix * N_GROUPS + vng_ix] != -1) {
                 MPI_Get(
                     &remote_vn_act, 
                     1, 
                     MPI_DOUBLE, 
-                    vn_proc_id(CONN[on_ix * N_REC + vng_ix], vng_ix), 
-                    vn_local_ix(CONN[on_ix * N_REC + vng_ix], vng_ix), 
+                    vn_proc_id(CONN[on_ix * N_GROUPS + vng_ix], vng_ix), 
+                    vn_local_ix(CONN[on_ix * N_GROUPS + vng_ix], vng_ix), 
                     1, 
                     MPI_DOUBLE,
                     win_vn2on
@@ -336,14 +337,14 @@ void send_on_to_vn() {
     // MPE_Log_event(ON2VN_SEND_ACTIVATIONS_START, 0, "");
     int dest_proc_id, dest_local_idx;
 
-    for (int vng_ix = 0; vng_ix < N_REC; vng_ix++) {
+    for (int vng_ix = 0; vng_ix < N_GROUPS; vng_ix++) {
         // MPE_Log_event(SEND_ACTIVATIONS_SEND_VNG_START, 0, "");
 
         for (int on_ix = 0; on_ix < N_ON_PROC; on_ix++) {
             // MPE_Log_event(SEND_ACTIVATIONS_SEND_SINGLE_ON_START, 0, "");
 
-            dest_proc_id = vn_conn_proc_id(CONN[vng_ix * N_ON_PROC + on_ix]);
-            dest_local_idx = vn_conn_local_idx(dest_proc_id, CONN[vng_ix * N_ON_PROC + on_ix]);
+            dest_proc_id = vn_conn_proc_id(CONN_global_ix[on_ix * N_GROUPS + vng_ix]);
+            dest_local_idx = vn_conn_local_idx(dest_proc_id, CONN_global_ix[on_ix * N_GROUPS + vng_ix]);
 
             MPI_Isend(
                 &ON_A[on_ix], 
@@ -352,7 +353,7 @@ void send_on_to_vn() {
                 dest_proc_id, 
                 dest_local_idx, 
                 MPI_COMM_WORLD, 
-                &on_to_vn_send_requests[vng_ix * N_ON_PROC + on_ix]);
+                &on_to_vn_send_requests[on_ix * N_GROUPS + vng_ix]);
 
             // MPE_Log_event(SEND_ACTIVATIONS_SEND_SINGLE_ON_END, 0, "");
         }
@@ -434,10 +435,10 @@ void on2vn_step() {
 
 #pragma region Main setup, teardown and public API
 
-void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_proc, int* vng_sizes_vns, int n_vn_vng, int vng_ix, MPI_Comm vng_comm, int* conn, double* Vn_r, int* Vn_n,
+void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_proc, int* vng_sizes_vns, int n_vn_vng, int vng_ix, MPI_Comm vng_comm, int* conn, int* conn_global_ix, double* Vn_r, int* Vn_n,
                         int n_conn_global, int n_conn_proc, int n_vn_conn_proc, int* vns_n_conns, int* vns_distribution, int* vns_proc, int* vns_proc_on_to_vn) { // modify CONN to new way!
 
-    N_REC = n_groups;
+    N_GROUPS = n_groups;
     N_VN_PROC = n_vn_p;
     N_ON_PROC = n_on_p;
     VNG_SIZES_PROC = vng_sizes_proc;
@@ -467,6 +468,7 @@ void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_pr
     own_vng_id = vng_ix;
     VNG_COMM = vng_comm;
     CONN = conn;
+    CONN_global_ix = conn_global_ix;
     VN_R = Vn_r;
     VN_N = Vn_n;
 
@@ -487,7 +489,7 @@ void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_pr
     // MPI_Win_allocate(n_vn_p * sizeof(double), sizeof(double), MPI_INFO_NULL, MPI_COMM_WORLD, &VN_A_FROM_ONs, &win_on2vn);
     MPI_Win_allocate(n_vn_p * sizeof(double), sizeof(double), MPI_INFO_NULL, MPI_COMM_WORLD, &VN_A_WEIGHTED, &win_vn2on);
 
-    on_to_vn_send_requests = new MPI_Request[N_ON_PROC * N_REC];
+    on_to_vn_send_requests = new MPI_Request[N_ON_PROC * N_GROUPS];
     vn_accumulation_send_requests = new MPI_Request[N_VN_CONN_PROC];
 }
 

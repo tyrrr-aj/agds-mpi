@@ -29,6 +29,7 @@ const int AGDS_MASTER_RANK = 0;
 
 const double EPSILON = 0.00001;
 
+
 #pragma region Debug
 
 void debug_printf_from_vng_leaders(const int rank, const int vng_rank, const int vng_id, const int n_vn_vng) {
@@ -40,6 +41,40 @@ void debug_printf_from_vng_leaders(const int rank, const int vng_rank, const int
 
 void debug_printf_from_all_workers(const int rank, const int vng_id, const int n_vn_p) {
     printf("I'm %d, working for %d, and I've received %d values\n", rank, vng_id, n_vn_p);
+}
+
+#pragma endregion
+
+
+#pragma region Logging
+
+void init_logging() {
+    MPE_Init_log();
+    init_events();
+}
+
+void save_log(int size) {
+    const int log_file_max_length = 50;
+    char log_file_name[log_file_max_length];
+    snprintf(log_file_name, log_file_max_length, "inference%d", size);
+
+    MPE_Finish_log(log_file_name);
+}
+
+#pragma endregion
+
+
+#pragma region Measurements
+
+double make_measurement() {
+    MPI_Barrier(MPI_COMM_WORLD);
+    return MPI_Wtime();
+}
+
+void report_times(int rank, double start_time, double end_time) {
+    if (rank == AGDS_MASTER_RANK) {
+        printf("Time: %.2fs\n", end_time - start_time);
+    }
 }
 
 #pragma endregion
@@ -155,12 +190,13 @@ void share_vng_proc_sizes(int* const master_ranks, int* const Vng_n_p) {
 }
 
 // create group and communicator for masters of VNGs
-void setup_vng_communicators(const MPI_Group& world_group, int* const master_ranks, MPI_Group& masters_group, MPI_Comm& masters_comm) {
+void setup_vng_communicators(const MPI_Group &world_group, int* const master_ranks, MPI_Group &masters_group, MPI_Comm &masters_comm) {
     MPI_Group_incl(world_group, N_GROUPS, master_ranks, &masters_group);
     MPI_Comm_create_group(MPI_COMM_WORLD, masters_group, MASTERS_TAG, &masters_comm);
 }
 
-void broadcast_conn_matrix(int size, int rank, int& n_on_p, int* const CONN, int*& CONN_p) {
+void broadcast_conn_matrix(const int size, const int rank, int& n_on_p, int* const CONN, int* &CONN_proc, 
+        int* const CONN_global_ix, int* &CONN_global_ix_proc) {
     int* CONN_len_all_proc;
     int* displacements;
     if (rank == AGDS_MASTER_RANK) {
@@ -179,8 +215,11 @@ void broadcast_conn_matrix(int size, int rank, int& n_on_p, int* const CONN, int
         cumulated_sum_shifted(CONN_len_all_proc, size, displacements);
     }
 
-    CONN_p = new int[n_on_p * N_GROUPS];
-    MPI_Scatterv(CONN, CONN_len_all_proc, displacements, MPI_INT, CONN_p, n_on_p * N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    CONN_proc = new int[n_on_p * N_GROUPS];
+    CONN_global_ix_proc = new int[n_on_p * N_GROUPS];
+
+    MPI_Scatterv(CONN, CONN_len_all_proc, displacements, MPI_INT, CONN_proc, n_on_p * N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    MPI_Scatterv(CONN_global_ix, CONN_len_all_proc, displacements, MPI_INT, CONN_global_ix_proc, n_on_p * N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
 
     if (rank == AGDS_MASTER_RANK) {
         delete[] CONN_len_all_proc;
@@ -188,10 +227,70 @@ void broadcast_conn_matrix(int size, int rank, int& n_on_p, int* const CONN, int
     }
 }
 
+void broadcast_vn_conns() {
+    
+}
+
 #pragma endregion
 
 
 #pragma region World Master-specific
+
+
+int desired_n_assigned_connections(const int rank, const int size) {
+    const int total_n_connections = N_ON * N_GROUPS;
+    return total_n_connections / size + (total_n_connections % size > rank) ? 1 : 0;
+}
+
+
+void divide_vn_conns(const int mpi_size, int* const N_vn_vng, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns) {
+    int total_n_vns = sum(N_vn_vng, N_GROUPS);
+    int proc_ix = 0;
+    int conns_assigned_to_proc = 0;
+    int conns_to_assign_in_current_vn = N_vn_vng[0];
+    int vns_within_proc_ix = 0; // index for filling Vns_on_to_vn and Vns_n_conns arrays
+
+    N_vn_conn[0] = 0;
+    Vns_distribution[0] = 1;
+
+    int vn_ix = 0;
+
+    while (vn_ix < total_n_vns) {
+        if (conns_assigned_to_proc + conns_to_assign_in_current_vn <= desired_n_assigned_connections(proc_ix, mpi_size)) {
+            // all connections of VN vn_ix can "fit" into currently filled process
+
+            conns_assigned_to_proc += conns_to_assign_in_current_vn;
+            N_vn_conn[proc_ix]++;
+            Vns_on_to_vn[vns_within_proc_ix] = vn_ix;
+            Vns_n_conns[vns_within_proc_ix] = conns_to_assign_in_current_vn;
+
+            vns_within_proc_ix++;
+            
+            // moving to next vn
+            vn_ix++;
+            conns_to_assign_in_current_vn = N_vn_vng[vn_ix];
+            Vns_distribution[vn_ix] = 1;
+        }
+        else {
+            if (conns_assigned_to_proc < desired_n_assigned_connections(proc_ix, mpi_size)) {
+                // some of the connections of VN vn_ix can "fit" into currently filled process, but some must be transferred to the next process
+
+                N_vn_conn[proc_ix]++;
+                Vns_on_to_vn[vns_within_proc_ix] = vn_ix;
+                Vns_distribution[vn_ix]++;
+                Vns_n_conns[vns_within_proc_ix] = desired_n_assigned_connections(proc_ix, mpi_size) - conns_assigned_to_proc;
+
+                conns_to_assign_in_current_vn -= Vns_n_conns[vns_within_proc_ix];
+                vns_within_proc_ix++;
+            }
+            
+            // moving to next process
+            conns_assigned_to_proc = 0;
+            proc_ix++;
+        }
+    }
+}
+
 
 void get_global_vn_conn_indices(int* CONN_global, int* CONN, int* CONN_ix, int* VN_conn_counts_cumulated) {
     for (int i = 0; i < N_ON * N_GROUPS; i++) {
@@ -261,7 +360,7 @@ int* divide_workers(int* counts, int mpi_size, int* masters_indices, int* Vng_n_
 }
 
 
-int build_tree(double* values, double* tree, int* counts, int* CONN, int* CONN_ix, int g_ix) {
+int build_tree(double* const values, double* const tree, int* const counts, int* const CONN, int* const CONN_ix, const int g_ix) {
     // mock implementation
     double* tree_tmp = new double[N_ON];
     int* counts_tmp = new int[N_ON];
@@ -310,26 +409,34 @@ int build_tree(double* values, double* tree, int* counts, int* CONN, int* CONN_i
 }
 
 // init data, divide processes into groups, build mock tree for each VNG
-void setup_data_and_groups(int size, double* data, double* trees, int* N_vn_vngs, int* CONN, int* CONN_global_ix,
-        int* Vng_n_vns, int* worker_spread, int* master_ranks, int* Vng_n_p) {
+void setup_data_and_groups(const int size, double* &data, double* const trees, int* const N_vn_vngs, int* const CONN, 
+        int* const CONN_global_ix, int* const Vng_n_vns, int* &worker_spread, int* const master_ranks, int* const Vng_n_p, 
+        int* const N_vn_conn, int* &Vns_on_to_vn, int* &Vns_distribution, int* &Vns_n_conns, int &n_vn) {
     data = init_full_data(N_GROUPS, N_ON);
 
     int* CONN_local_ix = new int[N_ON * N_GROUPS];
 
-    int offset = 0;
+    n_vn = 0;
     for (int g = 0; g < N_GROUPS; g++) {
-        Vng_n_vns[g] = build_tree(&(data[g * N_ON]), &(trees[offset]), &(N_vn_vngs[offset]), CONN, CONN_local_ix, g);
-        offset += Vng_n_vns[g];
-        printf("N_vns_vng_%d: %d\n", g, Vng_n_vns[g]);
+        Vng_n_vns[g] = build_tree(&(data[g * N_ON]), &(trees[n_vn]), &(N_vn_vngs[n_vn]), CONN, CONN_local_ix, g);
+        n_vn += Vng_n_vns[g];
+        // printf("N_vns_vng_%d: %d\n", g, Vng_n_vns[g]);
     }
 
     worker_spread = divide_workers(Vng_n_vns, size, master_ranks, Vng_n_p);
 
     // compute vn-on connections global indices
     int* VN_conn_counts_cumulated = new int[N_ON * N_GROUPS];
-    cumulated_sum(N_vn_vngs, sum(Vng_n_vns, N_GROUPS), VN_conn_counts_cumulated);
+    cumulated_sum(N_vn_vngs, n_vn, VN_conn_counts_cumulated);
 
     get_global_vn_conn_indices(CONN_global_ix, CONN, CONN_local_ix, VN_conn_counts_cumulated);
+
+    // divide conns for on->vn step
+    Vns_distribution = new int[n_vn];
+    Vns_on_to_vn = new int[n_vn + size];
+    Vns_n_conns = new int[n_vn + size];
+
+    divide_vn_conns(size, N_vn_vngs, N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns);
 
     delete[] CONN_local_ix;
     delete[] VN_conn_counts_cumulated;
@@ -360,16 +467,29 @@ int main(int argc, char** argv)
     #pragma region Init variables
 
     double* data;
-    double* trees = new double[N_GROUPS * N_ON];;
-    int* N_vn_vngs = new int[N_GROUPS * N_ON];
-    int* Vng_n_vns = new int[N_GROUPS];
+    double* trees;
+    int* N_vn_vngs; // number of VN<->ON CONNECTIONS from each VN, stored by VNGs
+    int* Vng_n_vns; // number of VNs in each VNG
     int* worker_spread;
     int master_ranks[N_GROUPS];
-    int Vng_n_p[N_GROUPS];
+    int Vng_n_p[N_GROUPS]; // number of processes assigned to each VNG
 
-    int* CONN = new int[N_ON * N_GROUPS];
-    int* CONN_global_ix = new int[N_ON * N_GROUPS];
-    int* CONN_p;
+    int n_vn; // total number of VNs in AGDS
+
+    int* CONN; // all ids of VNs
+    int* CONN_proc; // ids of VNs assigned to specific process
+
+    int* CONN_global_ix; // all global ids of ON->VN CONNECTIONS
+    int* CONN_global_ix_proc; // global ids of ON->VN CONNECTION held by specific process
+
+    int* N_vn_conn; // number of distinct VNs assigned to each process in ON->VN
+    int* Vns_on_to_vn; // indices of VNs assigned to each process in ON->VN step, stored by processes ([P0_VN0, P0_VN1, ..., P1_VN0, ...])
+    int* Vns_distribution; // number of processes over which each VN is "spread" during the ON->VN step
+    int* Vns_n_conns; // number of connections assigned to process for each VN, stored by processes and VNs ([P0_VN0_N, P0_VN1_N, ..., P1_VN0_N])
+
+    int* Vns_on_to_vn_proc;
+    int* Vns_distribution_proc;
+    int* Vns_n_conns_proc;
 
     double *values, *tree;
     int *counts, *N_vn_vng;
@@ -394,15 +514,27 @@ int main(int argc, char** argv)
 
     #pragma endregion
 
+
+    #pragma region Setup
+
     // setup global Master
     if (rank == AGDS_MASTER_RANK) { // process is a global Master
-        setup_data_and_groups(size, data, trees, N_vn_vngs, CONN, CONN_global_ix, Vng_n_vns, worker_spread, master_ranks, Vng_n_p);
+        trees = new double[N_GROUPS * N_ON];
+        N_vn_vngs = new int[N_GROUPS * N_ON];
+        Vng_n_vns = new int[N_GROUPS];
+        CONN = new int[N_ON * N_GROUPS];
+        CONN_global_ix = new int[N_ON * N_GROUPS];
+        N_vn_conn = new int[size];
+
+        setup_data_and_groups(size, data, trees, N_vn_vngs, CONN, CONN_global_ix, Vng_n_vns, worker_spread, master_ranks, Vng_n_p, 
+            N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, n_vn);
     }
 
     // share basic data with everybody
     share_vng_proc_sizes(master_ranks, Vng_n_p);
     setup_vng_communicators(world_group, master_ranks, masters_group, masters_comm);
-    broadcast_conn_matrix(size, rank, n_on_p, CONN, CONN_p);
+    broadcast_conn_matrix(size, rank, n_on_p, CONN, CONN_proc, CONN_global_ix, CONN_global_ix_proc);
+    broadcast_vn_conns();
     
 
     // setup VNG masters
@@ -439,12 +571,14 @@ int main(int argc, char** argv)
     int N_vn_p[n_vn_p];
     distribute_reordered_vn_prod_vng(Vn_prod_vng, N_vn_vng_reordered, n_vn_of_ps_in_vng, displ_vng_p, Vn_prod_p, N_vn_p, n_vn_p, vng_comm);
 
+    #pragma endregion
 
-    // PREDICT
+
+    #pragma region Experiment
     // compute inferences
 
-    setup_for_inference(n_vn_p, n_on_p, N_GROUPS, Vng_n_p, NULL, n_vn_vng, vng_id, vng_comm, CONN_p, Vn_prod_p, N_vn_p,
-        0, 0, 0, NULL, NULL, NULL, NULL);
+    setup_for_inference(n_vn_p, n_on_p, N_GROUPS, Vng_n_p, Vng_n_vns, n_vn_vng, vng_id, vng_comm, CONN_proc, CONN_global_ix_proc, 
+        Vn_prod_p, N_vn_p, N_ON * N_GROUPS, 0, 0, NULL, NULL, NULL, NULL);
 
     int* all_activated_vns = new int[ACTIVATED_VNS_PER_GROUP * N_GROUPS];
     int* on_queries = new int[ACTIVATED_ONS * N_QUERIES];
@@ -454,6 +588,8 @@ int main(int argc, char** argv)
     double start_time, end_time;
 
     if (K == 1) {
+        #pragma region Mock queries
+
         if (rank == AGDS_MASTER_RANK) {
             srand(SEED);
             mock_on_queries(on_queries, N_QUERIES, N_ON, ACTIVATED_ONS);
@@ -478,31 +614,21 @@ int main(int argc, char** argv)
             }
         }
 
-        // logging init
-        MPE_Init_log();
-        init_events();
+        #pragma endregion
 
-        // ********************************** MEASUREMENTS **********************************
-
-        MPI_Barrier(MPI_COMM_WORLD);
-        start_time = MPI_Wtime();
+        init_logging();
+        start_time = make_measurement();
 
         for (int q_ix = 0; q_ix < N_QUERIES; q_ix++) {
             inference(NULL, 0, &(local_on_queries[local_on_queries_displacements[q_ix]]), local_on_queries_lengths[q_ix], false, K);
         }
 
-        MPI_Barrier(MPI_COMM_WORLD);
-        end_time = MPI_Wtime();
-
-        // ********************************** MEASUREMENTS END **********************************
-        
-        const int log_file_max_length = 50;
-        char log_file_name[log_file_max_length];
-        snprintf(log_file_name, log_file_max_length, "inference%d", size);
-
-        MPE_Finish_log(log_file_name);
+        end_time = make_measurement();
+        save_log(size);
     }
     else {
+        #pragma region Mock queries
+
         // generate random inactive (output) VNGs in each query, done at global master
         int vn_queries_inactive_vngs[N_QUERIES * (N_GROUPS - ACTIVATED_VNGS)];
 
@@ -548,46 +674,34 @@ int main(int argc, char** argv)
             }
         }
 
-        // logging init
-        MPE_Init_log();
-        init_events();
+        #pragma endregion
 
-        // ********************************** MEASUREMENTS **********************************
-
-        MPI_Barrier(MPI_COMM_WORLD);
-        start_time = MPI_Wtime();
+        init_logging();
+        start_time = make_measurement();
 
         for (int q_ix = 0; q_ix < N_QUERIES; q_ix++) {
             inference(&(local_vn_queries[local_vn_queries_displs[q_ix]]), local_vn_queries_lengths[q_ix], NULL, 0, local_vn_queries_active[q_ix], K);
         }
 
-        MPI_Barrier(MPI_COMM_WORLD);
-        end_time = MPI_Wtime();
-
-        // ********************************** MEASUREMENTS END **********************************
-        
-        const int log_file_max_length = 50;
-        char log_file_name[log_file_max_length];
-        snprintf(log_file_name, log_file_max_length, "inference%d", size);
-
-        MPE_Finish_log(log_file_name);
+        end_time = make_measurement();
+        save_log(size);
     }
 
     teardown_inference();
 
-    // REPORTING
+    report_times(rank, start_time, end_time);
 
-    if (rank == AGDS_MASTER_RANK) {
-        printf("Time: %.2fs\n", end_time - start_time);
-    }
+    #pragma endregion
 
     
     # pragma region Cleanup
 
     delete[] Vng_n_vns;
-    delete[] CONN_p;
+    delete[] CONN_proc;
     delete[] Vn_prod_p;
     delete[] Vn_prod_from_scan_p;
+    delete[] CONN_proc;
+    delete[] CONN_global_ix_proc;
 
     if (rank == AGDS_MASTER_RANK) {
         delete[] data;
@@ -597,6 +711,11 @@ int main(int argc, char** argv)
 
         delete[] CONN;
         delete[] CONN_global_ix;
+
+        delete[] N_vn_conn;
+        delete[] Vns_on_to_vn;
+        delete[] Vns_distribution;
+        delete[] Vns_n_conns;
 
         delete[] worker_spread;
     //     // delete[] query;
