@@ -13,10 +13,10 @@
 #include "mock_agds_data.hpp"
 
 
-const int N_ON = 100000;
+const int N_ON = 10; //100000;
 const int N_GROUPS = 2;
 
-const int N_QUERIES = 50;
+const int N_QUERIES = 1; //50;
 const int ACTIVATED_VNS_PER_GROUP = 2;
 const int ACTIVATED_VNGS = N_GROUPS - 1;
 const int ACTIVATED_ONS = 5;
@@ -27,7 +27,7 @@ const int SEED = 42;
 const int MASTERS_TAG = 0;
 const int AGDS_MASTER_RANK = 0;
 
-const double EPSILON = 0.00001;
+const double EPSILON = 0.1; //0.00001;
 
 
 #pragma region Debug
@@ -227,8 +227,30 @@ void broadcast_conn_matrix(const int size, const int rank, int& n_on_p, int* con
     }
 }
 
-void broadcast_vn_conns() {
-    
+void broadcast_vn_conns(const int mpi_size, const int rank, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns,
+        int &n_vn_from_on_conn_proc, int* &Vns_on_to_vn_proc, int* &Vns_distribution_proc, int* &Vns_n_conns_proc) {
+    MPI_Scatter(N_vn_conn, 1, MPI_INT, &n_vn_from_on_conn_proc, 1, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+
+    Vns_on_to_vn_proc = new int[n_vn_from_on_conn_proc];
+    Vns_distribution_proc = new int[n_vn_from_on_conn_proc];
+    Vns_n_conns_proc = new int[n_vn_from_on_conn_proc];
+
+    int* proc_offsets = new int[mpi_size];
+    if (rank == AGDS_MASTER_RANK) {
+        cumulated_sum_shifted(N_vn_conn, mpi_size, proc_offsets);
+    }
+
+    int* proc_offsets_for_distribution = new int[mpi_size];
+    for (int proc_ix = 0; proc_ix < mpi_size; proc_ix++) {
+        proc_offsets_for_distribution[proc_ix] = Vns_on_to_vn[proc_offsets[proc_ix]];
+    }
+
+    MPI_Scatterv(Vns_on_to_vn, N_vn_conn, proc_offsets, MPI_INT, Vns_on_to_vn_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    MPI_Scatterv(Vns_distribution, N_vn_conn, proc_offsets_for_distribution, MPI_INT, Vns_distribution_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    MPI_Scatterv(Vns_n_conns_proc, N_vn_conn, proc_offsets, MPI_INT, Vns_n_conns_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+
+    delete[] proc_offsets;
+    delete[] proc_offsets_for_distribution;
 }
 
 #pragma endregion
@@ -239,24 +261,27 @@ void broadcast_vn_conns() {
 
 int desired_n_assigned_connections(const int rank, const int size) {
     const int total_n_connections = N_ON * N_GROUPS;
-    return total_n_connections / size + (total_n_connections % size > rank) ? 1 : 0;
+    return total_n_connections / size + ((total_n_connections % size > rank) ? 1 : 0);
 }
 
 
-void divide_vn_conns(const int mpi_size, int* const N_vn_vng, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns) {
-    int total_n_vns = sum(N_vn_vng, N_GROUPS);
+void divide_vn_from_on_conns(const int mpi_size, int n_vn, int* const N_vn_vng, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns) {
     int proc_ix = 0;
     int conns_assigned_to_proc = 0;
     int conns_to_assign_in_current_vn = N_vn_vng[0];
     int vns_within_proc_ix = 0; // index for filling Vns_on_to_vn and Vns_n_conns arrays
+
+    int desired_n_conns_in_proc;
 
     N_vn_conn[0] = 0;
     Vns_distribution[0] = 1;
 
     int vn_ix = 0;
 
-    while (vn_ix < total_n_vns) {
-        if (conns_assigned_to_proc + conns_to_assign_in_current_vn <= desired_n_assigned_connections(proc_ix, mpi_size)) {
+    while (vn_ix < n_vn) {
+        desired_n_conns_in_proc = desired_n_assigned_connections(proc_ix, mpi_size);
+
+        if (conns_assigned_to_proc + conns_to_assign_in_current_vn <= desired_n_conns_in_proc) {
             // all connections of VN vn_ix can "fit" into currently filled process
 
             conns_assigned_to_proc += conns_to_assign_in_current_vn;
@@ -272,13 +297,13 @@ void divide_vn_conns(const int mpi_size, int* const N_vn_vng, int* const N_vn_co
             Vns_distribution[vn_ix] = 1;
         }
         else {
-            if (conns_assigned_to_proc < desired_n_assigned_connections(proc_ix, mpi_size)) {
+            if (conns_assigned_to_proc < desired_n_conns_in_proc) {
                 // some of the connections of VN vn_ix can "fit" into currently filled process, but some must be transferred to the next process
 
                 N_vn_conn[proc_ix]++;
                 Vns_on_to_vn[vns_within_proc_ix] = vn_ix;
                 Vns_distribution[vn_ix]++;
-                Vns_n_conns[vns_within_proc_ix] = desired_n_assigned_connections(proc_ix, mpi_size) - conns_assigned_to_proc;
+                Vns_n_conns[vns_within_proc_ix] = desired_n_conns_in_proc - conns_assigned_to_proc;
 
                 conns_to_assign_in_current_vn -= Vns_n_conns[vns_within_proc_ix];
                 vns_within_proc_ix++;
@@ -292,9 +317,14 @@ void divide_vn_conns(const int mpi_size, int* const N_vn_vng, int* const N_vn_co
 }
 
 
-void get_global_vn_conn_indices(int* CONN_global, int* CONN, int* CONN_ix, int* VN_conn_counts_cumulated) {
-    for (int i = 0; i < N_ON * N_GROUPS; i++) {
-        CONN_global[i] = VN_conn_counts_cumulated[CONN[i]] + CONN_ix[i];
+void get_global_vn_conn_indices(int* const CONN_global_ix, int* const CONN, int* const CONN_local_ix, int* const VN_conn_counts_cumulated, int* const Vng_n_vn_cumulated) {
+    int abs_ix;
+    
+    for (int on_ix = 0; on_ix < N_ON; on_ix++) {
+        for (int g_ix = 0; g_ix < N_GROUPS; g_ix++) {
+            abs_ix = on_ix * N_GROUPS + g_ix;
+            CONN_global_ix[abs_ix] = VN_conn_counts_cumulated[CONN[abs_ix] + Vng_n_vn_cumulated[g_ix]] + CONN_local_ix[abs_ix];
+        }
     }
 }
 
@@ -360,46 +390,50 @@ int* divide_workers(int* counts, int mpi_size, int* masters_indices, int* Vng_n_
 }
 
 
-int build_tree(double* const values, double* const tree, int* const counts, int* const CONN, int* const CONN_ix, const int g_ix) {
+int build_tree(double* const values, double* const tree, int* const counts, int* const CONN, int* const CONN_local_ix, const int g_ix) {
     // mock implementation
     double* tree_tmp = new double[N_ON];
     int* counts_tmp = new int[N_ON];
     int distinct_count = 0;
     bool found;
 
-    for (int i = 0; i < N_ON; i++) {
+    for (int on_ix = 0; on_ix < N_ON; on_ix++) {
         found = false;
 
-        for (int j = 0; j < distinct_count; j++) {
-            if (fabs(tree_tmp[j] - values[i]) < EPSILON) {
-                counts_tmp[j]++;
-                CONN[i * N_GROUPS + g_ix] = j;
-                CONN_ix[i * N_GROUPS + g_ix] = counts_tmp[j] - 1;
+        for (int i = 0; i < distinct_count; i++) {
+            if (fabs(tree_tmp[i] - values[on_ix]) < EPSILON) {
+                counts_tmp[i]++;
+                CONN[on_ix * N_GROUPS + g_ix] = i;
+                CONN_local_ix[on_ix * N_GROUPS + g_ix] = counts_tmp[i] - 1;
                 found = true;
                 break;
             }
         }
 
         if (!found) {
-            tree_tmp[distinct_count] = values[i];
+            tree_tmp[distinct_count] = values[on_ix];
             counts_tmp[distinct_count] = 1;
-            CONN[i * N_GROUPS + g_ix] = distinct_count;
-            CONN_ix[i * N_GROUPS + g_ix] = 0;
+            CONN[on_ix * N_GROUPS + g_ix] = distinct_count;
+            CONN_local_ix[on_ix * N_GROUPS + g_ix] = 0;
             distinct_count++;
         }
     }
 
     std::vector<int> indices = sort_indices(tree_tmp, distinct_count);
 
-    int i_dest = 0;
+    int i_src = 0;
     for (auto i: indices) {
-        tree[i_dest] = tree_tmp[i];
-        counts[i_dest] = counts_tmp[i];
-        i_dest++;
+        tree[i] = tree_tmp[i_src];
+        counts[i] = counts_tmp[i_src];
+        i_src++;
     }
 
-    for (int i = 0; i < N_ON; i++) {
-        CONN[i * N_GROUPS + g_ix] = indices[CONN[i * N_GROUPS + g_ix]];
+    int absolute_on_ix, new_vn_index;
+    for (int on_ix = 0; on_ix < N_ON; on_ix++) {
+        absolute_on_ix = on_ix * N_GROUPS + g_ix;
+
+        new_vn_index = indices[CONN[absolute_on_ix]];
+        CONN[absolute_on_ix] = new_vn_index;
     }
 
     delete[] tree_tmp;
@@ -426,20 +460,24 @@ void setup_data_and_groups(const int size, double* &data, double* const trees, i
     worker_spread = divide_workers(Vng_n_vns, size, master_ranks, Vng_n_p);
 
     // compute vn-on connections global indices
-    int* VN_conn_counts_cumulated = new int[N_ON * N_GROUPS];
-    cumulated_sum(N_vn_vngs, n_vn, VN_conn_counts_cumulated);
+    int* VN_conn_counts_cumulated = new int[n_vn];
+    cumulated_sum_shifted(N_vn_vngs, n_vn, VN_conn_counts_cumulated);
 
-    get_global_vn_conn_indices(CONN_global_ix, CONN, CONN_local_ix, VN_conn_counts_cumulated);
+    int* Vng_n_vns_cumulated = new int[N_GROUPS];
+    cumulated_sum_shifted(Vng_n_vns, N_GROUPS, Vng_n_vns_cumulated);
+
+    get_global_vn_conn_indices(CONN_global_ix, CONN, CONN_local_ix, VN_conn_counts_cumulated, Vng_n_vns_cumulated);
 
     // divide conns for on->vn step
-    Vns_distribution = new int[n_vn];
+    Vns_distribution = new int[n_vn + size];
     Vns_on_to_vn = new int[n_vn + size];
     Vns_n_conns = new int[n_vn + size];
 
-    divide_vn_conns(size, N_vn_vngs, N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns);
+    divide_vn_from_on_conns(size, n_vn, N_vn_vngs, N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns);
 
     delete[] CONN_local_ix;
     delete[] VN_conn_counts_cumulated;
+    delete[] Vng_n_vns_cumulated;
 }
 
 #pragma endregion
@@ -482,11 +520,12 @@ int main(int argc, char** argv)
     int* CONN_global_ix; // all global ids of ON->VN CONNECTIONS
     int* CONN_global_ix_proc; // global ids of ON->VN CONNECTION held by specific process
 
-    int* N_vn_conn; // number of distinct VNs assigned to each process in ON->VN
+    int* N_vn_from_on_conn; // number of distinct VNs assigned to each process in ON->VN
     int* Vns_on_to_vn; // indices of VNs assigned to each process in ON->VN step, stored by processes ([P0_VN0, P0_VN1, ..., P1_VN0, ...])
     int* Vns_distribution; // number of processes over which each VN is "spread" during the ON->VN step
     int* Vns_n_conns; // number of connections assigned to process for each VN, stored by processes and VNs ([P0_VN0_N, P0_VN1_N, ..., P1_VN0_N])
 
+    int n_vn_from_on_conn_proc;
     int* Vns_on_to_vn_proc;
     int* Vns_distribution_proc;
     int* Vns_n_conns_proc;
@@ -524,17 +563,18 @@ int main(int argc, char** argv)
         Vng_n_vns = new int[N_GROUPS];
         CONN = new int[N_ON * N_GROUPS];
         CONN_global_ix = new int[N_ON * N_GROUPS];
-        N_vn_conn = new int[size];
+        N_vn_from_on_conn = new int[size];
 
         setup_data_and_groups(size, data, trees, N_vn_vngs, CONN, CONN_global_ix, Vng_n_vns, worker_spread, master_ranks, Vng_n_p, 
-            N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, n_vn);
+            N_vn_from_on_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, n_vn);
     }
 
     // share basic data with everybody
     share_vng_proc_sizes(master_ranks, Vng_n_p);
     setup_vng_communicators(world_group, master_ranks, masters_group, masters_comm);
     broadcast_conn_matrix(size, rank, n_on_p, CONN, CONN_proc, CONN_global_ix, CONN_global_ix_proc);
-    broadcast_vn_conns();
+    broadcast_vn_conns(size, rank, N_vn_from_on_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, n_vn_from_on_conn_proc, Vns_on_to_vn_proc, 
+        Vns_distribution_proc, Vns_n_conns_proc);
     
 
     // setup VNG masters
@@ -578,7 +618,8 @@ int main(int argc, char** argv)
     // compute inferences
 
     setup_for_inference(n_vn_p, n_on_p, N_GROUPS, Vng_n_p, Vng_n_vns, n_vn_vng, vng_id, vng_comm, CONN_proc, CONN_global_ix_proc, 
-        Vn_prod_p, N_vn_p, N_ON * N_GROUPS, 0, 0, NULL, NULL, NULL, NULL);
+        Vn_prod_p, N_vn_p, N_ON * N_GROUPS, sum(Vns_n_conns_proc, n_vn_from_on_conn_proc), n_vn_from_on_conn_proc, Vns_n_conns_proc, 
+        Vns_distribution_proc, NULL, Vns_on_to_vn_proc);
 
     int* all_activated_vns = new int[ACTIVATED_VNS_PER_GROUP * N_GROUPS];
     int* on_queries = new int[ACTIVATED_ONS * N_QUERIES];
@@ -703,6 +744,10 @@ int main(int argc, char** argv)
     delete[] CONN_proc;
     delete[] CONN_global_ix_proc;
 
+    delete[] Vns_on_to_vn_proc;
+    delete[] Vns_distribution_proc;
+    delete[] Vns_n_conns_proc;
+
     if (rank == AGDS_MASTER_RANK) {
         delete[] data;
 
@@ -712,7 +757,7 @@ int main(int argc, char** argv)
         delete[] CONN;
         delete[] CONN_global_ix;
 
-        delete[] N_vn_conn;
+        delete[] N_vn_from_on_conn;
         delete[] Vns_on_to_vn;
         delete[] Vns_distribution;
         delete[] Vns_n_conns;
