@@ -13,6 +13,8 @@ int sum(int* arr, int len);
 int max_elem_index(int* arr, int len);
 std::vector<int> sort_indices(double* v, int n);
 
+int n_elems_in_equal_split(int total_n_elements, int n_portions, int portion_index);
+
 void print_arr_mpi(double* arr, std::string name, int len, MPI_Comm comm);
 void print_arr_mpi(int* arr, std::string name, int len, MPI_Comm comm);
 

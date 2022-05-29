@@ -90,6 +90,21 @@ void mpi_size_and_rank(const MPI_Comm &comm, int &size, int &rank) {
 #pragma endregion
 
 
+#pragma region Individual computations
+
+void global_vn_indices_vn_to_vn_and_vn_to_on(const int vng_id, const int vng_rank, const int vng_size, const int n_vn_p, int* const Vng_n_vns, int* const Vns_vn_to_vn_and_vn_to_on_proc) {
+    int n_vn_vng = Vng_n_vns[vng_id];
+    int vng_offset = sum(Vng_n_vns, vng_id); // total number of VNs in preceeding VNGs
+
+    for (int vn_loc_ix = 0; vn_loc_ix < n_vn_p; vn_loc_ix++) {
+        Vns_vn_to_vn_and_vn_to_on_proc[vn_loc_ix] = vng_offset + vng_size * vn_loc_ix + vng_rank;
+    }
+}
+
+
+#pragma endregion
+
+
 #pragma region VNG group
 
 void split_processes_into_vngs(int* const worker_spread, const int rank, int &vng_id, int &vng_size, int &vng_rank, MPI_Comm &vng_comm) {
@@ -563,6 +578,8 @@ int main(int argc, char** argv)
 
     int* N_vn_vng_reordered;
 
+    int* Vns_vn_to_vn_and_vn_to_on_proc;
+
     #pragma endregion
 
 
@@ -620,6 +637,9 @@ int main(int argc, char** argv)
     int N_vn_p[n_vn_p];
     distribute_reordered_vn_prod_vng(Vn_prod_vng, N_vn_vng_reordered, N_vn_of_ps_in_vng, displ_vng_p, Vn_prod_p, N_vn_p, n_vn_p, vng_comm);
 
+    Vns_vn_to_vn_and_vn_to_on_proc = new int[n_vn_p];
+    global_vn_indices_vn_to_vn_and_vn_to_on(vng_id, vng_rank, vng_size, n_vn_p, Vng_n_vns, Vns_vn_to_vn_and_vn_to_on_proc);
+
     #pragma endregion
 
     // ****************************************************** CHECKED UNTIL HERE ******************************************************
@@ -629,7 +649,7 @@ int main(int argc, char** argv)
 
     setup_for_inference(n_vn_p, n_on_p, N_GROUPS, Vng_n_p, Vng_n_vns, n_vn_vng, vng_id, vng_comm, CONN_proc, CONN_global_ix_proc, 
         Vn_prod_p, N_vn_p, N_ON * N_GROUPS, sum(Vns_n_conns_proc, n_vn_from_on_conn_proc), n_vn_from_on_conn_proc, Vns_n_conns_proc, 
-        Vns_distribution_proc, NULL, Vns_on_to_vn_proc);
+        Vns_distribution_proc, Vns_vn_to_vn_and_vn_to_on_proc, Vns_on_to_vn_proc);
 
     int* all_activated_vns = new int[ACTIVATED_VNS_PER_GROUP * N_GROUPS];
     int* on_queries = new int[ACTIVATED_ONS * N_QUERIES];
@@ -757,6 +777,8 @@ int main(int argc, char** argv)
     delete[] Vns_on_to_vn_proc;
     delete[] Vns_distribution_proc;
     delete[] Vns_n_conns_proc;
+
+    delete[] Vns_vn_to_vn_and_vn_to_on_proc;
 
     if (rank == AGDS_MASTER_RANK) {
         delete[] data;

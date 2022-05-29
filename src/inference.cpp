@@ -29,8 +29,8 @@ int* VNS_N_CONNS; // number of ON->VN connections for each VN controlled by the 
 processes; this array stores the number of processes over which each VN controlled by the process
 is distributed */
 int* VNS_DISTRIBUTION;
-int* VNS_PROC; // indices of VNs controlled by the process in VN->VN and VN->ON step
-int* VNS_PROC_ON_TO_VN; // indices of VNs controlled by the process in ON->VN step
+int* VNS_PROC; // global indices of VNs controlled by the process in VN->VN and VN->ON step
+int* VNS_PROC_ON_TO_VN; // global indices of VNs controlled by the process in ON->VN step
 
 int N_VN_IN_VNG;
 
