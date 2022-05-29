@@ -100,7 +100,7 @@ void split_processes_into_vngs(int* const worker_spread, const int rank, int &vn
     MPI_Comm_rank(vng_comm, &vng_rank);
 }
 
-void broadcast_number_of_vns_in_vngs(int& n_vn_vng, const MPI_Comm &vng_comm) {
+void broadcast_number_of_vns_in_own_vng(int& n_vn_vng, const MPI_Comm &vng_comm) {
     // Each VNG leader informs the rest of processes in VNG about the number of VNs in this VNG
     MPI_Bcast(&n_vn_vng, 1, MPI_INT, 0, vng_comm);
 }
@@ -110,25 +110,25 @@ void compute_vn_prod(double* const tree, const int n_vn_vng, double* &Vn_prod_fr
     scan_prod_mpi(tree, n_vn_vng, &Vn_prod_from_scan_p, &vn_range, &n_vn_p, 0, vng_comm);
 }
 
-void broadcast_number_of_vns_in_vngs(int* const Vng_n_vns) {
+void broadcast_number_of_vns_in_all_vngs(int* const Vng_n_vns) {
     // Vector with numbers of VNs in each VNG is shared with all processes (by master)
     MPI_Bcast(Vng_n_vns, N_GROUPS, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
 }
 
-void gather_number_of_vns_per_proc(const int n_vn_p, int* const n_vn_of_ps_in_vng, int* &displ_vng_p, int vng_rank, int vng_size, const MPI_Comm &vng_comm) {
+void gather_number_of_vns_per_proc(const int n_vn_p, int* const N_vn_of_ps_in_vng, int* &displ_vng_p, int vng_rank, int vng_size, const MPI_Comm &vng_comm) {
     //      gathering information about number of VNs in each process within VNG
-    MPI_Gather(&n_vn_p, 1, MPI_INT, n_vn_of_ps_in_vng, 1, MPI_INT, 0, vng_comm);
+    MPI_Gather(&n_vn_p, 1, MPI_INT, N_vn_of_ps_in_vng, 1, MPI_INT, 0, vng_comm);
 
     if (vng_rank == 0) {
         displ_vng_p = new int[vng_size];
-        cumulated_sum_shifted(n_vn_of_ps_in_vng, vng_size, displ_vng_p);
+        cumulated_sum_shifted(N_vn_of_ps_in_vng, vng_size, displ_vng_p);
     }
 }
 
 void gather_full_vn_prod_from_scan_vng(double* const Vn_prod_from_scan_p, const int n_vn_p, double* const Vn_prod_from_scan_vng,
-        int* const n_vn_of_ps_in_vng, int* const displ_vng_p, const MPI_Comm &vng_comm) {
+        int* const N_vn_of_ps_in_vng, int* const displ_vng_p, const MPI_Comm &vng_comm) {
     //      gathering global Vn_prod_from_scan for each VNG
-    MPI_Gatherv(Vn_prod_from_scan_p, n_vn_p, MPI_DOUBLE, Vn_prod_from_scan_vng, n_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, 0, vng_comm);
+    MPI_Gatherv(Vn_prod_from_scan_p, n_vn_p, MPI_DOUBLE, Vn_prod_from_scan_vng, N_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, 0, vng_comm);
 }
 
 void reorder_vn_prod_vng(const int vng_size, const int vng_rank, const int n_vn_vng, double* const Vn_prod_vng, 
@@ -148,10 +148,10 @@ void reorder_vn_prod_vng(const int vng_size, const int vng_rank, const int n_vn_
     }
 }
 
-void distribute_reordered_vn_prod_vng(double* const Vn_prod_vng, int* const N_vn_vng_reordered, int* const n_vn_of_ps_in_vng, 
+void distribute_reordered_vn_prod_vng(double* const Vn_prod_vng, int* const N_vn_vng_reordered, int* const N_vn_of_ps_in_vng, 
         int* const displ_vng_p, double* const Vn_prod_p, int* const N_vn_p, int n_vn_p, const MPI_Comm &vng_comm) {
-    MPI_Scatterv(Vn_prod_vng, n_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, Vn_prod_p, n_vn_p, MPI_DOUBLE, 0, vng_comm);
-    MPI_Scatterv(N_vn_vng_reordered, n_vn_of_ps_in_vng, displ_vng_p, MPI_INT, N_vn_p, n_vn_p, MPI_INT, 0, vng_comm);
+    MPI_Scatterv(Vn_prod_vng, N_vn_of_ps_in_vng, displ_vng_p, MPI_DOUBLE, Vn_prod_p, n_vn_p, MPI_DOUBLE, 0, vng_comm);
+    MPI_Scatterv(N_vn_vng_reordered, N_vn_of_ps_in_vng, displ_vng_p, MPI_INT, N_vn_p, n_vn_p, MPI_INT, 0, vng_comm);
 }
 
 #pragma endregion
@@ -195,7 +195,7 @@ void setup_vng_communicators(const MPI_Group &world_group, int* const master_ran
     MPI_Comm_create_group(MPI_COMM_WORLD, masters_group, MASTERS_TAG, &masters_comm);
 }
 
-void broadcast_conn_matrix(const int size, const int rank, int& n_on_p, int* const CONN, int* &CONN_proc, 
+void scatter_conn_matrix(const int size, const int rank, int& n_on_p, int* const CONN, int* &CONN_proc, 
         int* const CONN_global_ix, int* &CONN_global_ix_proc) {
     int* CONN_len_all_proc;
     int* displacements;
@@ -227,30 +227,30 @@ void broadcast_conn_matrix(const int size, const int rank, int& n_on_p, int* con
     }
 }
 
-void broadcast_vn_conns(const int mpi_size, const int rank, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns,
-        int &n_vn_from_on_conn_proc, int* &Vns_on_to_vn_proc, int* &Vns_distribution_proc, int* &Vns_n_conns_proc) {
+void scatter_vn_conns(const int mpi_size, const int rank, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns, 
+        int* const proc_offsets, int &n_vn_from_on_conn_proc, int* &Vns_on_to_vn_proc, int* &Vns_distribution_proc, int* &Vns_n_conns_proc) {
     MPI_Scatter(N_vn_conn, 1, MPI_INT, &n_vn_from_on_conn_proc, 1, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
 
     Vns_on_to_vn_proc = new int[n_vn_from_on_conn_proc];
     Vns_distribution_proc = new int[n_vn_from_on_conn_proc];
     Vns_n_conns_proc = new int[n_vn_from_on_conn_proc];
 
-    int* proc_offsets = new int[mpi_size];
-    if (rank == AGDS_MASTER_RANK) {
-        cumulated_sum_shifted(N_vn_conn, mpi_size, proc_offsets);
-    }
+    int* proc_offsets_for_distribution;
 
-    int* proc_offsets_for_distribution = new int[mpi_size];
-    for (int proc_ix = 0; proc_ix < mpi_size; proc_ix++) {
-        proc_offsets_for_distribution[proc_ix] = Vns_on_to_vn[proc_offsets[proc_ix]];
+    if (rank == AGDS_MASTER_RANK) {
+    proc_offsets_for_distribution = new int[mpi_size];
+        for (int proc_ix = 0; proc_ix < mpi_size; proc_ix++) {
+            proc_offsets_for_distribution[proc_ix] = Vns_on_to_vn[proc_offsets[proc_ix]];
+        }
     }
 
     MPI_Scatterv(Vns_on_to_vn, N_vn_conn, proc_offsets, MPI_INT, Vns_on_to_vn_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
     MPI_Scatterv(Vns_distribution, N_vn_conn, proc_offsets_for_distribution, MPI_INT, Vns_distribution_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
-    MPI_Scatterv(Vns_n_conns_proc, N_vn_conn, proc_offsets, MPI_INT, Vns_n_conns_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
+    MPI_Scatterv(Vns_n_conns, N_vn_conn, proc_offsets, MPI_INT, Vns_n_conns_proc, n_vn_from_on_conn_proc, MPI_INT, AGDS_MASTER_RANK, MPI_COMM_WORLD);
 
-    delete[] proc_offsets;
-    delete[] proc_offsets_for_distribution;
+    if (rank == AGDS_MASTER_RANK) {
+        delete[] proc_offsets_for_distribution;
+    }
 }
 
 #pragma endregion
@@ -265,7 +265,8 @@ int desired_n_assigned_connections(const int rank, const int size) {
 }
 
 
-void divide_vn_from_on_conns(const int mpi_size, int n_vn, int* const N_vn_vng, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, int* const Vns_n_conns) {
+void divide_vn_from_on_conns(const int mpi_size, int n_vn, int* const N_vn_vng, int* const N_vn_conn, int* const Vns_on_to_vn, int* const Vns_distribution, 
+        int* const Vns_n_conns, int* const proc_offsets) {
     int proc_ix = 0;
     int conns_assigned_to_proc = 0;
     int conns_to_assign_in_current_vn = N_vn_vng[0];
@@ -275,6 +276,7 @@ void divide_vn_from_on_conns(const int mpi_size, int n_vn, int* const N_vn_vng, 
 
     N_vn_conn[0] = 0;
     Vns_distribution[0] = 1;
+    proc_offsets[0] = 0;
 
     int vn_ix = 0;
 
@@ -312,6 +314,9 @@ void divide_vn_from_on_conns(const int mpi_size, int n_vn, int* const N_vn_vng, 
             // moving to next process
             conns_assigned_to_proc = 0;
             proc_ix++;
+
+            N_vn_conn[proc_ix] = 0;
+            proc_offsets[proc_ix] = vns_within_proc_ix;
         }
     }
 }
@@ -419,25 +424,31 @@ int build_tree(double* const values, double* const tree, int* const counts, int*
         }
     }
 
-    std::vector<int> indices = sort_indices(tree_tmp, distinct_count);
+    std::vector<int> indices = sort_indices(tree_tmp, distinct_count); // store ordered indices of VNs in ascending order, i.e. for tree [5., 1., 3.] it will be [1, 2, 0]
 
     int i_src = 0;
     for (auto i: indices) {
-        tree[i] = tree_tmp[i_src];
-        counts[i] = counts_tmp[i_src];
+        tree[i_src] = tree_tmp[i];
+        counts[i_src] = counts_tmp[i];
         i_src++;
+    }
+
+    int* reverse_indices = new int[distinct_count]; // at position i it stores index to which VNi should go in sorted tree, i.e. for tree [5., 1., 3.] it will be [2, 0, 1]
+    for (int vn_ix = 0; vn_ix < distinct_count; vn_ix++) {
+        reverse_indices[indices[vn_ix]] = vn_ix;
     }
 
     int absolute_on_ix, new_vn_index;
     for (int on_ix = 0; on_ix < N_ON; on_ix++) {
         absolute_on_ix = on_ix * N_GROUPS + g_ix;
 
-        new_vn_index = indices[CONN[absolute_on_ix]];
+        new_vn_index = reverse_indices[CONN[absolute_on_ix]];
         CONN[absolute_on_ix] = new_vn_index;
     }
 
     delete[] tree_tmp;
     delete[] counts_tmp;
+    delete[] reverse_indices;
 
     return distinct_count;
 }
@@ -445,7 +456,7 @@ int build_tree(double* const values, double* const tree, int* const counts, int*
 // init data, divide processes into groups, build mock tree for each VNG
 void setup_data_and_groups(const int size, double* &data, double* const trees, int* const N_vn_vngs, int* const CONN, 
         int* const CONN_global_ix, int* const Vng_n_vns, int* &worker_spread, int* const master_ranks, int* const Vng_n_p, 
-        int* const N_vn_conn, int* &Vns_on_to_vn, int* &Vns_distribution, int* &Vns_n_conns, int &n_vn) {
+        int* const N_vn_conn, int* &Vns_on_to_vn, int* &Vns_distribution, int* &Vns_n_conns, int* const proc_offsets, int &n_vn) {
     data = init_full_data(N_GROUPS, N_ON);
 
     int* CONN_local_ix = new int[N_ON * N_GROUPS];
@@ -473,7 +484,7 @@ void setup_data_and_groups(const int size, double* &data, double* const trees, i
     Vns_on_to_vn = new int[n_vn + size];
     Vns_n_conns = new int[n_vn + size];
 
-    divide_vn_from_on_conns(size, n_vn, N_vn_vngs, N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns);
+    divide_vn_from_on_conns(size, n_vn, N_vn_vngs, N_vn_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, proc_offsets);
 
     delete[] CONN_local_ix;
     delete[] VN_conn_counts_cumulated;
@@ -507,7 +518,7 @@ int main(int argc, char** argv)
     double* data;
     double* trees;
     int* N_vn_vngs; // number of VN<->ON CONNECTIONS from each VN, stored by VNGs
-    int* Vng_n_vns; // number of VNs in each VNG
+    int* Vng_n_vns = new int[N_GROUPS]; // number of VNs in each VNG
     int* worker_spread;
     int master_ranks[N_GROUPS];
     int Vng_n_p[N_GROUPS]; // number of processes assigned to each VNG
@@ -524,6 +535,7 @@ int main(int argc, char** argv)
     int* Vns_on_to_vn; // indices of VNs assigned to each process in ON->VN step, stored by processes ([P0_VN0, P0_VN1, ..., P1_VN0, ...])
     int* Vns_distribution; // number of processes over which each VN is "spread" during the ON->VN step
     int* Vns_n_conns; // number of connections assigned to process for each VN, stored by processes and VNs ([P0_VN0_N, P0_VN1_N, ..., P1_VN0_N])
+    int* proc_offsets; // indices of first elemnts in arrays Vns_on_to_vn, Vns_n_conns that are relevant for each process
 
     int n_vn_from_on_conn_proc;
     int* Vns_on_to_vn_proc;
@@ -544,7 +556,7 @@ int main(int argc, char** argv)
 
     int* displ_vng_p;
 
-    int* n_vn_of_ps_in_vng;
+    int* N_vn_of_ps_in_vng;
     double* Vn_prod_from_scan_vng;
     double* Vn_prod_vng;
     double* Vn_prod_p;
@@ -560,22 +572,21 @@ int main(int argc, char** argv)
     if (rank == AGDS_MASTER_RANK) { // process is a global Master
         trees = new double[N_GROUPS * N_ON];
         N_vn_vngs = new int[N_GROUPS * N_ON];
-        Vng_n_vns = new int[N_GROUPS];
         CONN = new int[N_ON * N_GROUPS];
         CONN_global_ix = new int[N_ON * N_GROUPS];
         N_vn_from_on_conn = new int[size];
+        proc_offsets = new int[size];
 
         setup_data_and_groups(size, data, trees, N_vn_vngs, CONN, CONN_global_ix, Vng_n_vns, worker_spread, master_ranks, Vng_n_p, 
-            N_vn_from_on_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, n_vn);
+            N_vn_from_on_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, proc_offsets, n_vn);
     }
 
     // share basic data with everybody
     share_vng_proc_sizes(master_ranks, Vng_n_p);
     setup_vng_communicators(world_group, master_ranks, masters_group, masters_comm);
-    broadcast_conn_matrix(size, rank, n_on_p, CONN, CONN_proc, CONN_global_ix, CONN_global_ix_proc);
-    broadcast_vn_conns(size, rank, N_vn_from_on_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, n_vn_from_on_conn_proc, Vns_on_to_vn_proc, 
-        Vns_distribution_proc, Vns_n_conns_proc);
-    
+    scatter_conn_matrix(size, rank, n_on_p, CONN, CONN_proc, CONN_global_ix, CONN_global_ix_proc);
+    scatter_vn_conns(size, rank, N_vn_from_on_conn, Vns_on_to_vn, Vns_distribution, Vns_n_conns, proc_offsets, n_vn_from_on_conn_proc, 
+        Vns_on_to_vn_proc, Vns_distribution_proc, Vns_n_conns_proc);
 
     // setup VNG masters
     if (masters_comm != MPI_COMM_NULL) { // process is a Master of one of the VNGs
@@ -592,27 +603,26 @@ int main(int argc, char** argv)
 
     // setup VNGs
     split_processes_into_vngs(worker_spread, rank, vng_id, vng_size, vng_rank, vng_comm);
-    broadcast_number_of_vns_in_vngs(n_vn_vng, vng_comm);
-    // debug_printf_from_vng_leaders(rank, vng_rank, vng_id, n_vn_vng);
-    compute_vn_prod(tree, n_vn_vng, Vn_prod_from_scan_p, vn_range, n_vn_p, vng_comm);
-    // debug_printf_from_all_workers(rank, vng_id, n_vn_p);
-    broadcast_number_of_vns_in_vngs(Vng_n_vns);
+    broadcast_number_of_vns_in_own_vng(n_vn_vng, vng_comm);
+    compute_vn_prod(tree, n_vn_vng, Vn_prod_from_scan_p, vn_range, n_vn_p, vng_comm); // posible error in prod_scan_mpi - very low prod values sometimes
+    broadcast_number_of_vns_in_all_vngs(Vng_n_vns);
 
     if (vng_rank == 0) {
-        n_vn_of_ps_in_vng = new int[vng_size];
+        N_vn_of_ps_in_vng = new int[vng_size];
         Vn_prod_vng = new double[n_vn_vng];
         Vn_prod_from_scan_vng = new double[n_vn_vng];
     }
     Vn_prod_p = new double[n_vn_p];
 
-    gather_number_of_vns_per_proc(n_vn_p, n_vn_of_ps_in_vng, displ_vng_p, vng_rank, vng_size, vng_comm);
-    gather_full_vn_prod_from_scan_vng(Vn_prod_from_scan_p, n_vn_p, Vn_prod_from_scan_vng, n_vn_of_ps_in_vng, displ_vng_p, vng_comm);
+    gather_number_of_vns_per_proc(n_vn_p, N_vn_of_ps_in_vng, displ_vng_p, vng_rank, vng_size, vng_comm);
+    gather_full_vn_prod_from_scan_vng(Vn_prod_from_scan_p, n_vn_p, Vn_prod_from_scan_vng, N_vn_of_ps_in_vng, displ_vng_p, vng_comm);
     reorder_vn_prod_vng(vng_size, vng_rank, n_vn_vng, Vn_prod_vng, Vn_prod_from_scan_vng, N_vn_vng, N_vn_vng_reordered);
     int N_vn_p[n_vn_p];
-    distribute_reordered_vn_prod_vng(Vn_prod_vng, N_vn_vng_reordered, n_vn_of_ps_in_vng, displ_vng_p, Vn_prod_p, N_vn_p, n_vn_p, vng_comm);
+    distribute_reordered_vn_prod_vng(Vn_prod_vng, N_vn_vng_reordered, N_vn_of_ps_in_vng, displ_vng_p, Vn_prod_p, N_vn_p, n_vn_p, vng_comm);
 
     #pragma endregion
 
+    // ****************************************************** CHECKED UNTIL HERE ******************************************************
 
     #pragma region Experiment
     // compute inferences
@@ -763,6 +773,7 @@ int main(int argc, char** argv)
         delete[] Vns_n_conns;
 
         delete[] worker_spread;
+        delete[] proc_offsets;
     //     // delete[] query;
     }
 
@@ -772,7 +783,7 @@ int main(int argc, char** argv)
     if (masters_comm != MPI_COMM_NULL) {
         delete[] tree;
         delete[] N_vn_vng;
-        delete[] n_vn_of_ps_in_vng;
+        delete[] N_vn_of_ps_in_vng;
         delete[] Vn_prod_vng;
         delete[] Vn_prod_from_scan_vng;
         delete[] displ_vng_p;

@@ -1,8 +1,47 @@
-if [ $# -gt 0 ]
+#!/bin/bash
+
+
+# parse options
+
+n_processes=16 # default process number
+no_debug=-1
+debug_line=$no_debug # default - no debugging
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        "-n") n_processes=$2
+        shift 1
+        ;;
+        "-d") debug_line=$2
+        shift 1
+        ;;
+        *) echo "Invalid option: $1" >&2
+        exit 1
+        ;;
+    esac
+
+    shift 1
+done
+
+
+# compile code
+
+make
+
+
+# run code
+
+if [ $? -eq 0 ] # if build was succesfull, run the code
 then
-    make
-    mpiexec -n $1 xterm -e gdb ./agds_mpi
+
+    if [ $debug_line -ne $no_debug ]
+    then
+        mpiexec -n $n_processes xterm -e gdb -ex "break main.cpp:$debug_line" -ex "run" -ex "print rank" ./agds_mpi
+    else
+        mpiexec -n $n_processes ./agds_mpi
+    fi
+
 else
-    make
-    mpiexec -n 16 xterm -e gdb ./agds_mpi
+    echo "Compilation errors - skipping execution"
+    exit 1
 fi
