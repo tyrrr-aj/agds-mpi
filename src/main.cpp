@@ -16,7 +16,7 @@
 const int N_ON = 10; //100000;
 const int N_GROUPS = 2;
 
-const int N_QUERIES = 1; //50;
+const int N_QUERIES = 2; //50;
 const int ACTIVATED_VNS_PER_GROUP = 2;
 const int ACTIVATED_VNGS = N_GROUPS - 1;
 const int ACTIVATED_ONS = 5;
@@ -642,8 +642,6 @@ int main(int argc, char** argv)
 
     #pragma endregion
 
-    // ****************************************************** CHECKED UNTIL HERE ******************************************************
-
     #pragma region Experiment
     // compute inferences
 
@@ -686,6 +684,8 @@ int main(int argc, char** argv)
         }
 
         #pragma endregion
+
+        // ****************************************************** CHECKED UNTIL HERE ******************************************************
 
         init_logging();
         start_time = make_measurement();
