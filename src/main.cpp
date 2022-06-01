@@ -122,7 +122,7 @@ void broadcast_number_of_vns_in_own_vng(int& n_vn_vng, const MPI_Comm &vng_comm)
 
 void compute_vn_prod(double* const tree, const int n_vn_vng, double* &Vn_prod_from_scan_p, double &vn_range, int &n_vn_p, const MPI_Comm &vng_comm) {
     // compute VN_prod_from_scan_p vector via scan - it's sorted, which is not the desired order
-    scan_prod_mpi(tree, n_vn_vng, &Vn_prod_from_scan_p, &vn_range, &n_vn_p, 0, vng_comm);
+    scan_prod_mpi(tree, n_vn_vng, Vn_prod_from_scan_p, vn_range, n_vn_p, 0, vng_comm);
 }
 
 void broadcast_number_of_vns_in_all_vngs(int* const Vng_n_vns) {

@@ -57,7 +57,7 @@ std::vector<int> sort_indices(double* v, int n) {
 int n_elems_in_equal_split(int total_n_elements, int n_portions, int portion_index) {
     // function returns the number of elements assigned to portion i when splitting n (indivisible) elements between p portions in the most equal way possible
     // assuming that if equal split is impossible, portions 0...(n % p) should get n / p + 1 elements, and portions (n % p + 1)...p should get n / p elements
-    return total_n_elements / n_portions + (total_n_elements % n_portions > portion_index) ? 1 : 0;
+    return total_n_elements / n_portions + ((total_n_elements % n_portions > portion_index) ? 1 : 0);
 }
 
 

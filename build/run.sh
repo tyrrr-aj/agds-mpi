@@ -6,6 +6,7 @@
 n_processes=16 # default process number
 no_debug=-1
 debug_line=$no_debug # default - no debugging
+debug_file="main"
 
 while [ $# -gt 0 ]; do
     case $1 in
@@ -13,6 +14,9 @@ while [ $# -gt 0 ]; do
         shift 1
         ;;
         "-d") debug_line=$2
+        shift 1
+        ;;
+        "-df") debug_file=$2
         shift 1
         ;;
         *) echo "Invalid option: $1" >&2
@@ -36,7 +40,7 @@ then
 
     if [ $debug_line -ne $no_debug ]
     then
-        mpiexec -n $n_processes xterm -e gdb -ex "break main.cpp:$debug_line" -ex "run" -ex "print rank" ./agds_mpi
+        mpiexec -n $n_processes xterm -e gdb -ex "break $debug_file.cpp:$debug_line" -ex "run" -ex "print rank" ./agds_mpi
     else
         mpiexec -n $n_processes ./agds_mpi
     fi
