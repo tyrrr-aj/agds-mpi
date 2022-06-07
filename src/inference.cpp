@@ -13,6 +13,7 @@
 
 int N_PROC;
 
+int N_ON;
 int N_GROUPS;
 
 int N_VN_PROC;
@@ -24,6 +25,7 @@ int N_CONN_PROC; // number of INCOMING ON->VN connections controlled by the proc
 int N_VN_CONN_PROC; // number of distinct VNs whose connections are controlled by the process
 
 int* VNS_N_CONNS; // number of ON->VN connections for each VN controlled by the process at the ON->VN step
+int* VNS_N_CONNS_CUMULATED;
 
 /* each VN controlled by process may be distributed (for processing ON->VN connections) over multiple 
 processes; this array stores the number of processes over which each VN controlled by the process
@@ -126,8 +128,8 @@ int vn_conn_local_idx(int dest_proc_id, int conn_global_id) {
     }
 }
 
-int vn_by_conn_local_id(int conn_local_idx) {
-    return upper_bound(VNS_N_CONNS, N_VN_CONN_PROC, conn_local_idx);
+int vn_by_conn_local_id(const int conn_local_idx) {
+    return upper_bound(VNS_N_CONNS_CUMULATED, N_VN_CONN_PROC, conn_local_idx);
 }
 
 int vn_proc_id(int vn_global_id) {
@@ -248,20 +250,20 @@ void calculate_vn_activations() {
 #pragma region Accumulating VN activations at the end of ON->VN step
 
 void setup_receiving_vn_accumulation(MPI_Request* vn_accumulation_receive_requests, double* vn_accumulation_receive_buffer) {
-    int idx = 0;
+    int global_idx = 0;
 
-    for (int i = 0; i < N_VN_PROC; i++) {
-        for (int j = 0; j < VNS_DISTRIBUTION[i]; j++) {
+    for (int vn_ix = 0; vn_ix < N_VN_PROC; vn_ix++) {
+        for (int conn_ix = 0; conn_ix < VNS_DISTRIBUTION[vn_ix]; conn_ix++) {
             MPI_Irecv(
-                &vn_accumulation_receive_buffer[idx],
+                &vn_accumulation_receive_buffer[global_idx],
                 1,
                 MPI_DOUBLE,
                 MPI_ANY_SOURCE,
-                VNS_PROC[i],
+                VNS_PROC[vn_ix],
                 MPI_COMM_WORLD,
-                &vn_accumulation_receive_requests[i]);
+                &vn_accumulation_receive_requests[global_idx]);
 
-            idx++;
+            global_idx++;
         }
     }
 }
@@ -285,15 +287,14 @@ void send_vn_accumulation(double* vn_partial_activations) {
     // MPE_Log_event(ON2VN_UPDATE_VNS_ACTIVATED_BY_ONS_END, 0, "");
 }
 
-void receive_and_accumulate_vn_activations(MPI_Request* vn_accumulation_receive_requests, double* vn_accumulation_receive_buffer) {
-    int n_requests = sum(VNS_DISTRIBUTION, N_VN_PROC);
+void receive_and_accumulate_vn_activations(MPI_Request* vn_accumulation_receive_requests, double* vn_accumulation_receive_buffer, int n_partial_activations) {
     int* cumulated_vn_distribution = new int[N_VN_PROC];
     int index;
 
     cumulated_sum(VNS_DISTRIBUTION, N_VN_PROC, cumulated_vn_distribution);
 
-    for (int i = 0; i < n_requests; i++) {
-        MPI_Waitany(n_requests, vn_accumulation_receive_requests, &index, MPI_STATUS_IGNORE);
+    for (int i = 0; i < n_partial_activations; i++) {
+        MPI_Waitany(n_partial_activations, vn_accumulation_receive_requests, &index, MPI_STATUS_IGNORE);
         int vn_local_idx = upper_bound(cumulated_vn_distribution, N_VN_PROC, index);
         VN_A[vn_local_idx] += vn_accumulation_receive_buffer[index];
     }
@@ -303,12 +304,14 @@ void receive_and_accumulate_vn_activations(MPI_Request* vn_accumulation_receive_
 
 
 void accumulate_vn_activations(double* vn_partial_activations) {
-    MPI_Request* vn_accumulation_receive_requests = new MPI_Request[sum(VNS_DISTRIBUTION, N_VN_PROC)];
-    double* vn_accumulation_receive_buffer = new double[sum(VNS_DISTRIBUTION, N_VN_PROC)];
+    int n_partial_activations = sum(VNS_DISTRIBUTION, N_VN_PROC);
+
+    MPI_Request* vn_accumulation_receive_requests = new MPI_Request[n_partial_activations];
+    double* vn_accumulation_receive_buffer = new double[n_partial_activations];
 
     setup_receiving_vn_accumulation(vn_accumulation_receive_requests, vn_accumulation_receive_buffer);
     send_vn_accumulation(vn_partial_activations);
-    receive_and_accumulate_vn_activations(vn_accumulation_receive_requests, vn_accumulation_receive_buffer);
+    receive_and_accumulate_vn_activations(vn_accumulation_receive_requests, vn_accumulation_receive_buffer, n_partial_activations);
 
     delete[] vn_accumulation_receive_requests;
     delete[] vn_accumulation_receive_buffer;
@@ -435,9 +438,10 @@ void on2vn_step() {
 
 #pragma region Main setup, teardown and public API
 
-void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_proc, int* vng_sizes_vns, int n_vn_vng, int vng_ix, MPI_Comm vng_comm, int* conn, int* conn_global_ix, double* Vn_r, int* Vn_n,
+void setup_for_inference(int n_on, int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_proc, int* vng_sizes_vns, int n_vn_vng, int vng_ix, MPI_Comm vng_comm, int* conn, int* conn_global_ix, double* Vn_r, int* Vn_n,
                         int n_conn_global, int n_conn_proc, int n_vn_conn_proc, int* vns_n_conns, int* vns_distribution, int* vns_proc, int* vns_proc_on_to_vn) { // modify CONN to new way!
 
+    N_ON = n_on;
     N_GROUPS = n_groups;
     N_VN_PROC = n_vn_p;
     N_ON_PROC = n_on_p;
@@ -453,6 +457,9 @@ void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_pr
     VNS_PROC = vns_proc;
     VNS_PROC_ON_TO_VN = vns_proc_on_to_vn;
 
+    VNS_N_CONNS_CUMULATED = new int[N_VN_CONN_PROC];
+    cumulated_sum(VNS_N_CONNS, N_VN_CONN_PROC, VNS_N_CONNS_CUMULATED);
+
     MPI_Comm_size(MPI_COMM_WORLD, &N_PROC);
 
     VNG_SIZES_PROC_CUMULATED_SHIFTED = new int[n_groups];
@@ -462,7 +469,7 @@ void setup_for_inference(int n_vn_p, int n_on_p, int n_groups, int* vng_sizes_pr
     cumulated_sum(vng_sizes_vns, n_groups, VNG_SIZES_VNS_CUMULATED);
 
     VNG_SIZES_VNS_CUMULATED_SHIFTED = new int[n_groups];
-    cumulated_sum_shifted(vng_sizes_vns, n_groups, VNG_SIZES_VNS_CUMULATED);
+    cumulated_sum_shifted(vng_sizes_vns, n_groups, VNG_SIZES_VNS_CUMULATED_SHIFTED);
 
     N_VN_IN_VNG = n_vn_vng;
     own_vng_id = vng_ix;
@@ -512,6 +519,8 @@ void teardown_inference() {
     delete[] VNG_SIZES_PROC_CUMULATED_SHIFTED;
     delete[] VNG_SIZES_VNS_CUMULATED;
     delete[] VNG_SIZES_VNS_CUMULATED_SHIFTED;
+
+    delete[] VNS_N_CONNS_CUMULATED;
 }
 
 void init_inference(int* activated_vns, int n_activated_vns, int* activated_ons, int n_activated_ons) {
@@ -527,8 +536,20 @@ void init_inference(int* activated_vns, int n_activated_vns, int* activated_ons,
         ON_A[on_ix] = 0;
     }
 
+    // temporary solution, while ONs aren't distributed by modulo
+    int on_offset = 0;
+    int rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    for (int i = 0; i < rank; i++) {
+        on_offset += n_elems_in_equal_split(N_ON, N_PROC, i);
+    }
+
     for (int act_on_ix = 0; act_on_ix < n_activated_ons; act_on_ix++) {
-        ON_A[activated_ons[act_on_ix] % N_ON_PROC] = 1;
+        // desired solution
+        // ON_A[activated_ons[act_on_ix] % N_ON_PROC] = 1;
+
+        // temporary solution
+        ON_A[activated_ons[act_on_ix] - on_offset] = 1;
     }
 
     are_on_to_vn_send_requests_filled = false;
